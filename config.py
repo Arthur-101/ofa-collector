@@ -39,6 +39,7 @@ GITHUB_DATA_REPO = "Arthur-101/ofa-data"
 GITHUB_DATA_BRANCH = "main"
 GITHUB_DATA_FOLDER = "data"
 
-# FastAPI
+# FastAPI — Railway injects PORT env var dynamically, fallback to 8000 locally
+import os
 API_HOST = "0.0.0.0"
-API_PORT = 8000
+API_PORT = int(os.environ.get("PORT", 8000))
