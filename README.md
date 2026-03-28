@@ -49,11 +49,11 @@ GITHUB_TOKEN=         ← Personal Access Token with repo write access
 
 ## Local Catch-up
 
-After waking up, run from your main OFA project:
+Run from the main OFA project:
 ```bash
 python catchup.py
 ```
-This hits the Railway API and imports all missed rows into your local `options_flow.db`.
+This hits the Railway API and imports all missed rows into the local `options_flow.db`.
 
 ## Deploy to Railway
 
