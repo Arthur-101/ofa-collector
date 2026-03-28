@@ -1,0 +1,9 @@
+smartapi-python
+pyotp
+python-dotenv
+requests
+websocket-client
+apscheduler==3.10.4
+pytz
+fastapi
+uvicorn[standard]
