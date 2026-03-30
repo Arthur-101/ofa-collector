@@ -176,8 +176,13 @@ def flush_to_db(symbol: str) -> list[dict]:
     # Get current spot
     try:
         client = _af._get_client()
-        spot   = _af._get_spot(client, symbol)
-    except Exception:
+        spot = _af._get_spot(client, symbol)
+        if not spot:  # session expired, re-login
+            logger.warning("Spot fetch failed, re-logging in...")
+            client = _af._login()
+            spot = _af._get_spot(client, symbol)
+    except Exception as e:
+        logger.error("Could not fetch spot price: %s", e)
         spot = None
 
     timestamp = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
