@@ -155,10 +155,10 @@ def _on_error(wsapp, error) -> None:
     logger.error("WebSocket error: %s", error)
 
 
-def _on_close(wsapp) -> None:
+def _on_close(wsapp, close_status_code, close_msg) -> None:
     global _connected
     _connected = False
-    logger.warning("WebSocket closed")
+    logger.warning("WebSocket closed: %s %s", close_status_code, close_msg)
 
 
 # ── 5-min flush to SQLite ─────────────────────────────────────────────────────
