@@ -160,6 +160,18 @@ def _on_close(wsapp, close_status_code=None, close_msg=None) -> None:
     _connected = False
     logger.warning("WebSocket closed — code=%s msg=%s", close_status_code, close_msg)
 
+    # Auto-reconnect after 60 seconds
+    import threading
+    from config import SYMBOLS
+    def _reconnect():
+        import time
+        time.sleep(60)
+        logger.info("Attempting manual reconnect...")
+        try:
+            start_feed(SYMBOLS)
+        except Exception as e:
+            logger.error("Reconnect failed: %s", e)
+    threading.Thread(target=_reconnect, daemon=True, name="ws-reconnect").start()
 
 # ── 5-min flush to SQLite ─────────────────────────────────────────────────────
 
