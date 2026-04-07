@@ -48,11 +48,11 @@ def _export_job():
         logger.error("export_job error: %s", e)
 
 
-def _shutdown_job():
-    logger.info("⏰ shutdown_job fired — market closed, stopping scheduler")
-    if _scheduler:
-        _scheduler.shutdown(wait=False)
-    logger.info("Scheduler stopped. App idling until next reset_job.")
+# def _shutdown_job():
+#     logger.info("⏰ shutdown_job fired — market closed, stopping scheduler")
+#     if _scheduler:
+#         _scheduler.shutdown(wait=False)
+#     logger.info("Scheduler stopped. App idling until next reset_job.")
 
 
 def start_scheduler() -> BackgroundScheduler:
@@ -97,16 +97,16 @@ def start_scheduler() -> BackgroundScheduler:
     )
 
     # 4:00 PM IST — graceful shutdown
-    _scheduler.add_job(
-        _shutdown_job,
-        trigger="cron",
-        day_of_week="mon-fri",
-        hour=SHUTDOWN_HOUR,
-        minute=SHUTDOWN_MINUTE,
-        id="shutdown_job",
-        name="Post-market shutdown",
-        misfire_grace_time=300,
-    )
+    # _scheduler.add_job(
+    #     _shutdown_job,
+    #     trigger="cron",
+    #     day_of_week="mon-fri",
+    #     hour=SHUTDOWN_HOUR,
+    #     minute=SHUTDOWN_MINUTE,
+    #     id="shutdown_job",
+    #     name="Post-market shutdown",
+    #     misfire_grace_time=300,
+    # )
 
     _scheduler.start()
     logger.info("Scheduler started with %d jobs", len(_scheduler.get_jobs()))
