@@ -14,7 +14,7 @@ from config import (
     SYMBOLS, POLL_INTERVAL_MINUTES,
     RESET_HOUR, RESET_MINUTE,
     EXPORT_HOUR, EXPORT_MINUTE,
-    SHUTDOWN_HOUR, SHUTDOWN_MINUTE,
+    # SHUTDOWN_HOUR, SHUTDOWN_MINUTE,
 )
 
 logger = logging.getLogger(__name__)
