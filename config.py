@@ -22,8 +22,8 @@ RESET_MINUTE = 0
 EXPORT_HOUR = 15
 EXPORT_MINUTE = 31
 
-SHUTDOWN_HOUR = 16
-SHUTDOWN_MINUTE = 0
+# SHUTDOWN_HOUR = 16
+# SHUTDOWN_MINUTE = 0
 
 # Strike range around ATM (number of strikes each side)
 STRIKE_RANGE = 15
