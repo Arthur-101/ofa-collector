@@ -8,3 +8,4 @@ apscheduler==3.10.4
 pytz
 fastapi
 uvicorn[standard]
+supabase>=2.0.0

@@ -21,6 +21,7 @@ from SmartApi import SmartConnect
 from SmartApi.smartWebSocketV2 import SmartWebSocketV2
 
 from db import get_latest_oi_snapshot, insert_options_rows
+from db_supabase import insert_options_rows_supabase, get_latest_oi_snapshot_supabase
 from angel_fetcher import fetch_and_store as _angel_fetch_and_store
 
 # Import internal helpers directly by loading the module
@@ -198,7 +199,10 @@ def flush_to_db(symbol: str) -> list[dict]:
         spot = None
 
     timestamp = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
-    prev_oi   = get_latest_oi_snapshot(symbol)
+    # Try Supabase first for OI baseline, fall back to local SQLite
+    prev_oi = get_latest_oi_snapshot_supabase(symbol)
+    if not prev_oi:
+        prev_oi = get_latest_oi_snapshot(symbol)
 
     rows = []
     with _tick_lock:
@@ -239,8 +243,14 @@ def flush_to_db(symbol: str) -> list[dict]:
         })
 
     if rows:
+        # Write to local SQLite (backup)
         insert_options_rows(rows)
-        logger.info("[%s] %s — %d rows flushed to DB (spot ₹%.2f)",
+        # Write to Supabase (primary cloud DB)
+        try:
+            insert_options_rows_supabase(rows)
+        except Exception as e:
+            logger.error("Supabase write failed (local SQLite has the data): %s", e)
+        logger.info("[%s] %s — %d rows flushed to DB + Supabase (spot ₹%.2f)",
                     timestamp, symbol, len(rows), spot or 0)
     return rows
 

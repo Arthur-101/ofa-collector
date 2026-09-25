@@ -11,6 +11,7 @@ import base64
 from datetime import datetime, timezone
 import requests
 from db import get_rows_for_date
+from db_supabase import get_rows_for_date_supabase, purge_old_data_supabase
 from config import GITHUB_DATA_REPO, GITHUB_DATA_BRANCH, GITHUB_DATA_FOLDER
 
 logger = logging.getLogger(__name__)
@@ -97,7 +98,11 @@ def export_today() -> bool:
 
     logger.info("Starting end-of-day export for %s", date_str)
 
-    rows = get_rows_for_date(date_str)
+    # Prefer Supabase data (cloud primary), fall back to local SQLite
+    rows = get_rows_for_date_supabase(date_str)
+    if not rows:
+        logger.info("Supabase returned no rows, falling back to local SQLite")
+        rows = get_rows_for_date(date_str)
 
     if not rows:
         logger.warning("No rows found for %s — skipping export", date_str)
@@ -110,6 +115,11 @@ def export_today() -> bool:
 
     if success:
         logger.info("Export complete: %s (%d rows, %d bytes)", filename, len(rows), len(csv_bytes))
+        # After successful export, purge Supabase data older than 7 days
+        try:
+            purge_old_data_supabase()
+        except Exception as e:
+            logger.error("Post-export Supabase purge failed: %s", e)
     else:
         logger.error("Export failed for %s", date_str)
 

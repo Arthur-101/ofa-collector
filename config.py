@@ -1,4 +1,4 @@
-# config.py — ofa-collector configuration
+# config.py — ofa-collector configuration (Render + Supabase)
 
 # Symbols to monitor
 SYMBOLS = ["NIFTY"]
