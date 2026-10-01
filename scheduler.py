@@ -31,10 +31,16 @@ def _reset_job():
 
 def _poll_job():
     from ws_feed import flush_to_db
+    from cloud_pipeline import run_cloud_analysis
     for sym in SYMBOLS:
         try:
             rows = flush_to_db(sym)
             logger.info("poll_job: %d rows flushed for %s", len(rows), sym)
+            if rows:
+                try:
+                    run_cloud_analysis(sym, rows)
+                except Exception as e:
+                    logger.error("run_cloud_analysis failed for %s: %s", sym, e)
         except Exception as e:
             logger.error("poll_job error for %s: %s", sym, e)
 

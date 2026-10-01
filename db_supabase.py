@@ -6,9 +6,12 @@
 
 import os
 import logging
+from pathlib import Path
 from supabase import create_client, Client
 from dotenv import load_dotenv
+import numpy as np
 
+load_dotenv(Path(__file__).parent / ".env")
 load_dotenv()
 logger = logging.getLogger(__name__)
 
@@ -52,28 +55,186 @@ def insert_options_rows_supabase(rows: list[dict]) -> None:
         raise
 
 
-def insert_signal_supabase(signal: dict) -> None:
+def insert_signal_supabase(signal: dict) -> int | None:
     """
     Insert a single signal row to Supabase.
-    Uses upsert with ignore_duplicates to prevent duplicates.
+    Returns the generated signal ID on success, or None on failure.
     """
     client = get_supabase()
     try:
-        client.table("signals").upsert(
-            [signal],
-            on_conflict="symbol,strike,option_type,signal_type",
-            ignore_duplicates=True,
-        ).execute()
+        res = client.table("signals").insert([signal]).execute()
+        sig_id = res.data[0]["id"] if res.data else None
         logger.info(
-            "Supabase: signal inserted — %s %s %.0f %s",
+            "Supabase: signal inserted (id=%s) — %s %s %.0f %s",
+            sig_id,
             signal.get("signal_type", ""),
             signal.get("symbol", ""),
             signal.get("strike", 0),
             signal.get("option_type", ""),
         )
+        return sig_id
     except Exception as e:
         logger.error("Supabase signal insert failed: %s", e)
+        return None
+
+
+def update_signal_thesis_supabase(signal_id: int, thesis_data: dict) -> bool:
+    """
+    Update a signal row in Supabase with LLM thesis output.
+    """
+    if not signal_id or not thesis_data:
+        return False
+    client = get_supabase()
+    try:
+        client.table("signals").update({
+            "llm_thesis": thesis_data.get("thesis"),
+            "llm_bias": thesis_data.get("bias"),
+            "llm_confidence": thesis_data.get("confidence"),
+        }).eq("id", signal_id).execute()
+        logger.info("Supabase: signal %d updated with LLM thesis (%s, conf %s)",
+                    signal_id, thesis_data.get("bias"), thesis_data.get("confidence"))
+        return True
+    except Exception as e:
+        logger.error("Supabase signal thesis update failed for id=%s: %s", signal_id, e)
+        return False
+
+
+def signal_already_fired_today_supabase(symbol: str, strike: float, option_type: str,
+                                        signal_type: str, date_str: str) -> bool:
+    """
+    Check if this signal type on this strike has already fired today in Supabase.
+    Prevents duplicate signals across flushes.
+    """
+    client = get_supabase()
+    try:
+        res = (
+            client.table("signals")
+            .select("id")
+            .eq("symbol", symbol)
+            .eq("strike", strike)
+            .eq("option_type", option_type)
+            .eq("signal_type", signal_type)
+            .gte("fired_at", f"{date_str}T00:00:00")
+            .lt("fired_at", f"{date_str}T23:59:59.999999")
+            .limit(1)
+            .execute()
+        )
+        return bool(res.data)
+    except Exception as e:
+        logger.warning("Supabase signal_already_fired_today check error: %s", e)
+        return False
+
+
+def insert_market_context_supabase(ctx: dict) -> None:
+    """
+    Upsert a 5-minute market context snapshot to Supabase.
+    Uses on_conflict="symbol,timestamp" so updates to the same flush are safe.
+    """
+    if not ctx:
+        return
+    client = get_supabase()
+    try:
+        client.table("market_context").upsert(
+            [ctx],
+            on_conflict="symbol,timestamp",
+        ).execute()
+        logger.info(
+            "Supabase: market_context upserted for %s at %s (spot=%.2f PCR=%.2f stance=%s)",
+            ctx.get("symbol"), ctx.get("timestamp"), ctx.get("spot_price", 0),
+            ctx.get("pcr") or 0.0, ctx.get("ai_stance", "N/A")
+        )
+    except Exception as e:
+        logger.error("Supabase market_context upsert failed: %s", e)
         raise
+
+
+def get_latest_market_context_supabase(symbol: str) -> dict | None:
+    """
+    Fetch the most recent market_context row for a symbol from Supabase.
+    """
+    client = get_supabase()
+    try:
+        res = (
+            client.table("market_context")
+            .select("*")
+            .eq("symbol", symbol)
+            .order("timestamp", desc=True)
+            .limit(1)
+            .execute()
+        )
+        return res.data[0] if res.data else None
+    except Exception as e:
+        logger.error("Supabase get_latest_market_context failed: %s", e)
+        return None
+
+
+def insert_news_headlines_supabase(headlines: list[dict]) -> None:
+    """
+    Insert raw news headlines into news_raw table in Supabase.
+    """
+    if not headlines:
+        return
+    client = get_supabase()
+    try:
+        client.table("news_raw").insert(headlines).execute()
+        logger.info("Supabase: %d headlines inserted to news_raw", len(headlines))
+    except Exception as e:
+        logger.error("Supabase news_raw insert failed: %s", e)
+
+
+def get_spot_series_supabase(symbol: str, date_str: str) -> list[float]:
+    """
+    Fetch ordered spot price series for date_str from Supabase.
+    """
+    client = get_supabase()
+    try:
+        res = (
+            client.table("options_chain")
+            .select("timestamp,spot_price")
+            .eq("symbol", symbol)
+            .gte("timestamp", f"{date_str}T00:00:00")
+            .lte("timestamp", f"{date_str}T23:59:59")
+            .order("timestamp", desc=False)
+            .limit(1000)
+            .execute()
+        )
+        if not res.data:
+            return []
+        by_ts = {}
+        for r in res.data:
+            ts = r.get("timestamp")
+            sp = r.get("spot_price")
+            if ts and sp and sp > 0:
+                by_ts[ts] = float(sp)
+        return [by_ts[ts] for ts in sorted(by_ts.keys())]
+    except Exception as e:
+        logger.warning("Supabase get_spot_series error: %s", e)
+        return []
+
+
+def get_intraday_oi_changes_supabase(symbol: str, date_str: str) -> list[dict]:
+    """
+    Fetch non-null oi_change rows for date_str from Supabase.
+    """
+    client = get_supabase()
+    try:
+        res = (
+            client.table("options_chain")
+            .select("strike,option_type,expiry,oi_change,volume,iv,spot_price,timestamp")
+            .eq("symbol", symbol)
+            .gte("timestamp", f"{date_str}T00:00:00")
+            .lte("timestamp", f"{date_str}T23:59:59")
+            .not_.is_("oi_change", "null")
+            .order("timestamp", desc=False)
+            .limit(1000)
+            .execute()
+        )
+        return res.data or []
+    except Exception as e:
+        logger.warning("Supabase get_intraday_oi_changes error: %s", e)
+        return []
+
+
 
 
 def get_latest_oi_snapshot_supabase(symbol: str) -> dict[tuple, int]:
@@ -173,6 +334,30 @@ def purge_old_data_supabase() -> None:
     except Exception as e:
         logger.error("Supabase purge failed: %s", e)
         raise
+
+
+def count_trading_days_supabase(symbol: str) -> int:
+    """
+    Count distinct trading dates in options_chain from Supabase.
+    Used by anomaly detector to determine BOOTSTRAP vs FULL mode.
+    """
+    client = get_supabase()
+    try:
+        res = (
+            client.table("options_chain")
+            .select("timestamp")
+            .eq("symbol", symbol)
+            .order("timestamp", desc=True)
+            .limit(1000)
+            .execute()
+        )
+        if not res.data:
+            return 0
+        dates = {r["timestamp"][:10] for r in res.data if r.get("timestamp")}
+        return len(dates)
+    except Exception as e:
+        logger.warning("Supabase count_trading_days error: %s", e)
+        return 0
 
 
 def heartbeat() -> bool:

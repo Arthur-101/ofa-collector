@@ -78,3 +78,29 @@ def get_data(date: str = Query(default=None, description="Date in YYYY-MM-DD for
         "count": len(rows),
         "rows": rows,
     }
+
+
+@app.get("/api/market-context/latest")
+def get_latest_market_context(symbol: str = "NIFTY"):
+    """Fetch the latest market context snapshot from Supabase."""
+    from db_supabase import get_latest_market_context_supabase
+    ctx = get_latest_market_context_supabase(symbol)
+    if not ctx:
+        return JSONResponse(status_code=404, content={"message": f"No market context found for {symbol}"})
+    return ctx
+
+
+@app.post("/api/run-pipeline")
+def trigger_pipeline(symbol: str = "NIFTY"):
+    """
+    Manually trigger the full intelligence pipeline:
+    context calculation → anomaly detection → news fetching → LLM thesis generation → Supabase save.
+    """
+    from cloud_pipeline import run_cloud_analysis
+    try:
+        result = run_cloud_analysis(symbol)
+        return result
+    except Exception as e:
+        logger.error("Pipeline manual trigger error: %s", e)
+        return JSONResponse(status_code=500, content={"status": "error", "error": str(e)})
+
