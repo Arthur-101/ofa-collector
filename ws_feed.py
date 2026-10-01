@@ -182,8 +182,23 @@ def flush_to_db(symbol: str) -> list[dict]:
     Takes a snapshot of the tick store and writes rows to SQLite.
     Returns the list of rows written.
     """
-    if not _tick_store:
+    from holidays import is_market_holiday
+    is_hol, reason = is_market_holiday()
+    if is_hol:
+        logger.info("flush_to_db: market is closed today (%s). Skipping flush.", reason)
+        return []
+
+    with _tick_lock:
+        snapshot = dict(_tick_store)  # copy while holding lock
+
+    if not snapshot:
         logger.warning("flush_to_db: tick store is empty — WebSocket may not have data yet")
+        return []
+
+    # Dynamic safeguard: If total volume across all scrips is 0, market is closed / holiday
+    total_volume = sum(int(t.get("volume") or 0) for t in snapshot.values())
+    if total_volume == 0:
+        logger.info("flush_to_db: total volume across all strikes is 0 (market closed/holiday). Skipping flush.")
         return []
 
     # Get current spot
@@ -205,8 +220,6 @@ def flush_to_db(symbol: str) -> list[dict]:
         prev_oi = get_latest_oi_snapshot(symbol)
 
     rows = []
-    with _tick_lock:
-        snapshot = dict(_tick_store)  # copy while holding lock
 
     for token, tick in snapshot.items():
         scrip = _token_map.get(token)

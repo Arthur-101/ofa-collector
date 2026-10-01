@@ -24,19 +24,30 @@ _scheduler: BackgroundScheduler | None = None
 
 
 def _reset_job():
+    from holidays import is_market_holiday
+    is_hol, reason = is_market_holiday()
+    if is_hol:
+        logger.info("⏰ reset_job skipped: today is %s", reason)
+        return
     from db import reset_db
     logger.info("⏰ reset_job fired — wiping DB for new trading day")
     reset_db()
 
 
 def _poll_job():
+    from holidays import is_market_holiday
+    is_hol, reason = is_market_holiday()
+    if is_hol:
+        logger.debug("poll_job skipped: today is %s", reason)
+        return
+
     from ws_feed import flush_to_db
     from cloud_pipeline import run_cloud_analysis
     for sym in SYMBOLS:
         try:
             rows = flush_to_db(sym)
-            logger.info("poll_job: %d rows flushed for %s", len(rows), sym)
             if rows:
+                logger.info("poll_job: %d rows flushed for %s", len(rows), sym)
                 try:
                     run_cloud_analysis(sym, rows)
                 except Exception as e:
@@ -46,6 +57,11 @@ def _poll_job():
 
 
 def _export_job():
+    from holidays import is_market_holiday
+    is_hol, reason = is_market_holiday()
+    if is_hol:
+        logger.info("export_job skipped: today is %s", reason)
+        return
     from exporter import export_today
     logger.info("⏰ export_job fired — exporting today's data to GitHub")
     try:
