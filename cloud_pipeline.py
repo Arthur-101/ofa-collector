@@ -96,6 +96,13 @@ def run_cloud_analysis(symbol: str = "NIFTY", current_rows: list[dict] | None = 
     except Exception as e:
         logger.error("❌ Failed to save market_context to Supabase: %s", e)
 
+    # 7. Real-Time Signal Resolution (Monitor open targets, stops, MFE/MAE)
+    try:
+        from resolver import resolve_active_signals
+        resolve_active_signals(symbol, current_rows, ctx["timestamp"])
+    except Exception as e:
+        logger.error("❌ Signal resolution failed: %s", e)
+
     duration = (datetime.now(timezone.utc) - start_time).total_seconds()
     logger.info(
         "✨ Cloud cycle completed in %.2fs — Spot: ₹%.2f | PCR: %.2f | Stance: %s | New Signals: %d | Theses: %d",
