@@ -326,14 +326,10 @@ def purge_old_data_supabase() -> None:
     """
     Call the Supabase SQL function to purge options_chain and news_raw
     rows older than 7 days. Keeps database under ~90 MB forever.
+    TEMPORARILY PAUSED for signal backfill (capturing entry_premium, mfe, mae).
     """
-    client = get_supabase()
-    try:
-        client.rpc("purge_old_options_data").execute()
-        logger.info("Supabase: 7-day retention purge executed successfully")
-    except Exception as e:
-        logger.error("Supabase purge failed: %s", e)
-        raise
+    logger.info("Supabase: 7-day retention purge temporarily paused for signal backfill")
+    return
 
 
 def count_trading_days_supabase(symbol: str) -> int:
