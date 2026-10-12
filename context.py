@@ -126,12 +126,20 @@ def rsi_interpretation(rsi: float | None) -> str:
 def compute_walls_and_maxpain(rows: list[dict], spot: float) -> tuple[float, float, float]:
     """
     Computes (call_wall, put_wall, max_pain) from options snapshot rows.
+    Filters strictly to the nearest active weekly expiry to avoid monthly hedging distortion.
     """
+    valid_expiries = sorted(list(set([r["expiry"] for r in rows if r.get("expiry")])))
+    target_expiry = valid_expiries[0] if valid_expiries else None
+    if target_expiry:
+        filtered_rows = [r for r in rows if r.get("expiry") == target_expiry]
+    else:
+        filtered_rows = rows
+
     ce_strikes: dict[float, int] = {}
     pe_strikes: dict[float, int] = {}
     all_strikes = set()
 
-    for r in rows:
+    for r in filtered_rows:
         k = float(r["strike"])
         oi = int(r.get("oi") or 0)
         all_strikes.add(k)
