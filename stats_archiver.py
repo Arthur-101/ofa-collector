@@ -117,8 +117,8 @@ def archive_daily_strike_stats(trade_date: str, dry_run: bool = False) -> int:
                 continue
 
             strike_offset = int(round(strike - atm_strike))
-            # Keep reasonable strike offsets (within +/- 1500 points of ATM)
-            if abs(strike_offset) > 1500:
+            # Keep 31 ATM strikes (-750 to +750 points, in 50-pt steps)
+            if abs(strike_offset) > 750:
                 continue
 
             vol = int(r.get("volume") or 0)

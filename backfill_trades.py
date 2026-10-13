@@ -6,7 +6,7 @@
 # 3. 4-Quadrant bias re-derivation from underlying options_chain price & OI changes.
 # 4. Entry filters: ₹10 minimum premium, 14:40 IST cutoff.
 # 5. Stale LTP detection: Checks for zero volume change.
-# 6. Auditable population into `trades` table tagged with source='RULES', is_exploratory=TRUE.
+# 6. Auditable population into `trades` table for both RULES and LLM sources, tagged with is_exploratory=TRUE.
 
 import sys
 import logging
@@ -84,58 +84,70 @@ def _rederive_quadrant_bias(sig: dict, client) -> tuple[str, str]:
     return sig.get("signal_type", "OI_BUILDUP"), sig.get("bias", "NEUTRAL")
 
 
-def backfill_all_signals(dry_run: bool = False):
-    logger.info("==================================================")
-    logger.info("🚀 Starting historical signals backfill into trades (dry_run=%s)", dry_run)
-    logger.info("==================================================")
+def _simulate_and_insert_trade(client, sig_id: int, source: str, target_strike: float,
+                               target_type: str, sig_exp: str, bias_used: str,
+                               fired_at: str, is_late: bool, dry_run: bool) -> bool:
+    """Simulate a single trade from historical ticks and insert into trades table."""
+    sig_date = fired_at[:10]
 
-    client = db_supabase.get_supabase()
+    if bias_used == "NEUTRAL":
+        trade_row = {
+            "signal_id": sig_id,
+            "source": source,
+            "strike": target_strike,
+            "option_type": target_type,
+            "expiry": sig_exp,
+            "bias_used": bias_used,
+            "entry_at": fired_at,
+            "entry_premium": 0.0,
+            "exit_premium": 0.0,
+            "exit_reason": "NON_DIRECTIONAL",
+            "target_pct": TARGET_PCT,
+            "stop_pct": STOP_PCT,
+            "net_pnl_pct": 0.0,
+            "mfe": 0.0,
+            "mae": 0.0,
+            "resolved_at": fired_at,
+            "stale_ltp": False,
+            "is_exploratory": True,
+        }
+        if not dry_run:
+            db_supabase.insert_trade_supabase(trade_row)
+        return True
 
-    # Fetch all historical signals
     try:
-        res = client.table("signals").select("*").order("fired_at", desc=False).execute()
-        signals = res.data or []
+        tick_res = (
+            client.table("options_chain")
+            .select("timestamp,last_price,volume")
+            .eq("symbol", "NIFTY")
+            .eq("expiry", sig_exp)
+            .eq("strike", target_strike)
+            .eq("option_type", target_type)
+            .gt("timestamp", fired_at)
+            .lte("timestamp", f"{sig_date}T23:59:59")
+            .order("timestamp", desc=False)
+            .limit(100)
+            .execute()
+        )
+        ticks = tick_res.data or []
     except Exception as e:
-        logger.error("Failed to fetch signals: %s", e)
-        return
+        logger.debug("Failed to fetch tick history for signal %s: %s", sig_id, e)
+        return False
 
-    logger.info("Found %d historical signals to process", len(signals))
-
-    trades_created = 0
-    skipped_count = 0
-
-    for sig in signals:
-        sig_id = sig["id"]
-        fired_at = sig["fired_at"]
-        symbol = sig.get("symbol", "NIFTY")
-        sig_exp = sig.get("expiry")
-        sig_strike = float(sig.get("strike") or 0)
-        sig_type = sig.get("option_type")
-        sig_date = fired_at[:10]
-
-        if not sig_exp:
-            continue
-
-        # Re-derive bias with 4-Quadrant rule
-        signal_type, bias = _rederive_quadrant_bias(sig, client)
-
-        # Check late entry
-        fired_dt = datetime.fromisoformat(fired_at.replace("Z", "+00:00"))
-        is_late = (fired_dt.hour, fired_dt.minute) > (LATE_ENTRY_CUTOFF_HOUR_UTC, LATE_ENTRY_CUTOFF_MINUTE_UTC)
-
-        # If neutral bias -> non-directional
-        if bias == "NEUTRAL":
+    if not ticks:
+        # If fired after late cutoff, still record as SKIPPED_LATE_ENTRY
+        if is_late:
             trade_row = {
                 "signal_id": sig_id,
-                "source": "RULES",
-                "strike": sig_strike,
-                "option_type": sig_type,
+                "source": source,
+                "strike": target_strike,
+                "option_type": target_type,
                 "expiry": sig_exp,
-                "bias_used": bias,
+                "bias_used": bias_used,
                 "entry_at": fired_at,
                 "entry_premium": 0.0,
                 "exit_premium": 0.0,
-                "exit_reason": "NON_DIRECTIONAL",
+                "exit_reason": "SKIPPED_LATE_ENTRY",
                 "target_pct": TARGET_PCT,
                 "stop_pct": STOP_PCT,
                 "net_pnl_pct": 0.0,
@@ -147,185 +159,232 @@ def backfill_all_signals(dry_run: bool = False):
             }
             if not dry_run:
                 db_supabase.insert_trade_supabase(trade_row)
-            trades_created += 1
-            continue
+            return True
+        return False
 
-        # Fetch ticks strictly after fired_at on that same day, strictly matching target expiry
-        target_type = "CE" if bias == "BULLISH" else "PE"
-        target_strike = sig_strike if sig_type == target_type else round(float(sig.get("spot_price") or 22500) / 50.0) * 50.0
+    entry_tick = ticks[0]
+    entry_at = entry_tick["timestamp"]
+    entry_ltp = float(entry_tick.get("last_price") or 0)
+    entry_vol = int(entry_tick.get("volume") or 0)
 
-        try:
-            tick_res = (
-                client.table("options_chain")
-                .select("timestamp,last_price,volume")
-                .eq("symbol", symbol)
-                .eq("expiry", sig_exp)
-                .eq("strike", target_strike)
-                .eq("option_type", target_type)
-                .gt("timestamp", fired_at)
-                .lte("timestamp", f"{sig_date}T23:59:59")
-                .order("timestamp", desc=False)
-                .limit(100)
-                .execute()
-            )
-            ticks = tick_res.data or []
-        except Exception as e:
-            logger.debug("Failed to fetch tick history for signal %s: %s", sig_id, e)
-            continue
+    # Check volume confirmation / stale LTP
+    stale_ltp = False
+    try:
+        prior_res = (
+            client.table("options_chain")
+            .select("volume")
+            .eq("expiry", sig_exp)
+            .eq("strike", target_strike)
+            .eq("option_type", target_type)
+            .lte("timestamp", fired_at)
+            .order("timestamp", desc=True)
+            .limit(1)
+            .execute()
+        )
+        if prior_res.data:
+            prior_vol = int(prior_res.data[0].get("volume") or 0)
+            if entry_vol <= prior_vol:
+                stale_ltp = True
+    except Exception:
+        pass
 
-        if not ticks:
-            skipped_count += 1
-            continue
-
-        # Strict t+1 entry tick
-        entry_tick = ticks[0]
-        entry_at = entry_tick["timestamp"]
-        entry_ltp = float(entry_tick.get("last_price") or 0)
-        entry_vol = int(entry_tick.get("volume") or 0)
-
-        # Check volume confirmation / stale LTP
-        # Check volume at fired_at snapshot
-        stale_ltp = False
-        try:
-            prior_res = (
-                client.table("options_chain")
-                .select("volume")
-                .eq("expiry", sig_exp)
-                .eq("strike", target_strike)
-                .eq("option_type", target_type)
-                .lte("timestamp", fired_at)
-                .order("timestamp", desc=True)
-                .limit(1)
-                .execute()
-            )
-            if prior_res.data:
-                prior_vol = int(prior_res.data[0].get("volume") or 0)
-                if entry_vol <= prior_vol:
-                    stale_ltp = True
-        except Exception:
-            pass
-
-        # Apply entry filters
-        if is_late:
-            trade_row = {
-                "signal_id": sig_id,
-                "source": "RULES",
-                "strike": target_strike,
-                "option_type": target_type,
-                "expiry": sig_exp,
-                "bias_used": bias,
-                "entry_at": entry_at,
-                "entry_premium": round(entry_ltp, 2),
-                "exit_premium": round(entry_ltp, 2),
-                "exit_reason": "SKIPPED_LATE_ENTRY",
-                "target_pct": TARGET_PCT,
-                "stop_pct": STOP_PCT,
-                "net_pnl_pct": 0.0,
-                "mfe": 0.0,
-                "mae": 0.0,
-                "resolved_at": entry_at,
-                "stale_ltp": stale_ltp,
-                "is_exploratory": True,
-            }
-            if not dry_run:
-                db_supabase.insert_trade_supabase(trade_row)
-            trades_created += 1
-            continue
-
-        if entry_ltp < MIN_ENTRY_PREMIUM:
-            trade_row = {
-                "signal_id": sig_id,
-                "source": "RULES",
-                "strike": target_strike,
-                "option_type": target_type,
-                "expiry": sig_exp,
-                "bias_used": bias,
-                "entry_at": entry_at,
-                "entry_premium": round(entry_ltp, 2),
-                "exit_premium": round(entry_ltp, 2),
-                "exit_reason": "SKIPPED_LOW_PREMIUM",
-                "target_pct": TARGET_PCT,
-                "stop_pct": STOP_PCT,
-                "net_pnl_pct": 0.0,
-                "mfe": 0.0,
-                "mae": 0.0,
-                "resolved_at": entry_at,
-                "stale_ltp": stale_ltp,
-                "is_exploratory": True,
-            }
-            if not dry_run:
-                db_supabase.insert_trade_supabase(trade_row)
-            trades_created += 1
-            continue
-
-        # Simulate subsequent ticks to resolution
-        mfe = 0.0
-        mae = 0.0
-        exit_price = entry_ltp
-        exit_reason = "TIME_EXIT"
-        resolved_at = ticks[-1]["timestamp"]
-
-        for tk in ticks[1:]:
-            ltp = float(tk.get("last_price") or 0)
-            if ltp <= 0:
-                continue
-            pct_chg = (ltp - entry_ltp) / entry_ltp
-            mfe = max(mfe, pct_chg)
-            mae = min(mae, pct_chg)
-
-            tk_dt = datetime.fromisoformat(tk["timestamp"].replace("Z", "+00:00"))
-            is_time_exit = (tk_dt.hour > TIME_EXIT_HOUR_UTC or
-                            (tk_dt.hour == TIME_EXIT_HOUR_UTC and tk_dt.minute >= TIME_EXIT_MINUTE_UTC))
-
-            # Conservative tie-breaker: stop loss takes precedence
-            if pct_chg <= STOP_PCT:
-                exit_price = ltp
-                exit_reason = "STOP_HIT"
-                resolved_at = tk["timestamp"]
-                break
-            elif pct_chg >= TARGET_PCT:
-                exit_price = ltp
-                exit_reason = "TARGET_HIT"
-                resolved_at = tk["timestamp"]
-                break
-            elif is_time_exit:
-                exit_price = ltp
-                exit_reason = "TIME_EXIT"
-                resolved_at = tk["timestamp"]
-                break
-
-        gross_pnl = (exit_price - entry_ltp) / entry_ltp
-        net_pnl = round((gross_pnl - COST_PCT) * 100, 2)
-
+    if is_late:
         trade_row = {
             "signal_id": sig_id,
-            "source": "RULES",
+            "source": source,
             "strike": target_strike,
             "option_type": target_type,
             "expiry": sig_exp,
-            "bias_used": bias,
+            "bias_used": bias_used,
             "entry_at": entry_at,
             "entry_premium": round(entry_ltp, 2),
-            "exit_premium": round(exit_price, 2),
-            "exit_reason": exit_reason,
+            "exit_premium": round(entry_ltp, 2),
+            "exit_reason": "SKIPPED_LATE_ENTRY",
             "target_pct": TARGET_PCT,
             "stop_pct": STOP_PCT,
-            "net_pnl_pct": net_pnl,
-            "mfe": round(mfe * 100, 2),
-            "mae": round(mae * 100, 2),
-            "resolved_at": resolved_at,
+            "net_pnl_pct": 0.0,
+            "mfe": 0.0,
+            "mae": 0.0,
+            "resolved_at": entry_at,
             "stale_ltp": stale_ltp,
             "is_exploratory": True,
         }
-
         if not dry_run:
             db_supabase.insert_trade_supabase(trade_row)
+        return True
 
-        trades_created += 1
+    if entry_ltp < MIN_ENTRY_PREMIUM:
+        trade_row = {
+            "signal_id": sig_id,
+            "source": source,
+            "strike": target_strike,
+            "option_type": target_type,
+            "expiry": sig_exp,
+            "bias_used": bias_used,
+            "entry_at": entry_at,
+            "entry_premium": round(entry_ltp, 2),
+            "exit_premium": round(entry_ltp, 2),
+            "exit_reason": "SKIPPED_LOW_PREMIUM",
+            "target_pct": TARGET_PCT,
+            "stop_pct": STOP_PCT,
+            "net_pnl_pct": 0.0,
+            "mfe": 0.0,
+            "mae": 0.0,
+            "resolved_at": entry_at,
+            "stale_ltp": stale_ltp,
+            "is_exploratory": True,
+        }
+        if not dry_run:
+            db_supabase.insert_trade_supabase(trade_row)
+        return True
+
+    mfe = 0.0
+    mae = 0.0
+    exit_price = entry_ltp
+    exit_reason = "TIME_EXIT"
+    resolved_at = ticks[-1]["timestamp"]
+
+    for tk in ticks[1:]:
+        ltp = float(tk.get("last_price") or 0)
+        if ltp <= 0:
+            continue
+        pct_chg = (ltp - entry_ltp) / entry_ltp
+        mfe = max(mfe, pct_chg)
+        mae = min(mae, pct_chg)
+
+        tk_dt = datetime.fromisoformat(tk["timestamp"].replace("Z", "+00:00"))
+        is_time_exit = (tk_dt.hour > TIME_EXIT_HOUR_UTC or
+                        (tk_dt.hour == TIME_EXIT_HOUR_UTC and tk_dt.minute >= TIME_EXIT_MINUTE_UTC))
+
+        # Conservative tie-breaker: stop loss takes precedence
+        if pct_chg <= STOP_PCT:
+            exit_price = ltp
+            exit_reason = "STOP_HIT"
+            resolved_at = tk["timestamp"]
+            break
+        elif pct_chg >= TARGET_PCT:
+            exit_price = ltp
+            exit_reason = "TARGET_HIT"
+            resolved_at = tk["timestamp"]
+            break
+        elif is_time_exit:
+            exit_price = ltp
+            exit_reason = "TIME_EXIT"
+            resolved_at = tk["timestamp"]
+            break
+
+    gross_pnl = (exit_price - entry_ltp) / entry_ltp
+    net_pnl = round((gross_pnl - COST_PCT) * 100, 2)
+
+    trade_row = {
+        "signal_id": sig_id,
+        "source": source,
+        "strike": target_strike,
+        "option_type": target_type,
+        "expiry": sig_exp,
+        "bias_used": bias_used,
+        "entry_at": entry_at,
+        "entry_premium": round(entry_ltp, 2),
+        "exit_premium": round(exit_price, 2),
+        "exit_reason": exit_reason,
+        "target_pct": TARGET_PCT,
+        "stop_pct": STOP_PCT,
+        "net_pnl_pct": net_pnl,
+        "mfe": round(mfe * 100, 2),
+        "mae": round(mae * 100, 2),
+        "resolved_at": resolved_at,
+        "stale_ltp": stale_ltp,
+        "is_exploratory": True,
+    }
+    if not dry_run:
+        db_supabase.insert_trade_supabase(trade_row)
+    return True
+
+
+def backfill_all_signals(dry_run: bool = False):
+    logger.info("==================================================")
+    logger.info("🚀 Starting historical signals backfill into trades (dry_run=%s)", dry_run)
+    logger.info("==================================================")
+
+    client = db_supabase.get_supabase()
+
+    try:
+        res = client.table("signals").select("*").order("fired_at", desc=False).execute()
+        signals = res.data or []
+    except Exception as e:
+        logger.error("Failed to fetch signals: %s", e)
+        return
+
+    logger.info("Found %d historical signals to process", len(signals))
+
+    rules_trades_count = 0
+    llm_trades_count = 0
+    skipped_count = 0
+
+    for sig in signals:
+        sig_id = sig["id"]
+        fired_at = sig["fired_at"]
+        sig_exp = sig.get("expiry")
+        sig_strike = float(sig.get("strike") or 0)
+        sig_type = sig.get("option_type")
+
+        if not sig_exp:
+            continue
+
+        # Re-derive bias with 4-Quadrant rule
+        signal_type, bias = _rederive_quadrant_bias(sig, client)
+
+        fired_dt = datetime.fromisoformat(fired_at.replace("Z", "+00:00"))
+        is_late = (fired_dt.hour, fired_dt.minute) > (LATE_ENTRY_CUTOFF_HOUR_UTC, LATE_ENTRY_CUTOFF_MINUTE_UTC)
+
+        # 1. RULES Trade
+        target_type = "CE" if bias == "BULLISH" else "PE"
+        target_strike = sig_strike if sig_type == target_type else round(float(sig.get("spot_price") or 22500) / 50.0) * 50.0
+
+        ok_rules = _simulate_and_insert_trade(
+            client=client,
+            sig_id=sig_id,
+            source="RULES",
+            target_strike=target_strike if bias != "NEUTRAL" else sig_strike,
+            target_type=target_type if bias != "NEUTRAL" else sig_type,
+            sig_exp=sig_exp,
+            bias_used=bias,
+            fired_at=fired_at,
+            is_late=is_late,
+            dry_run=dry_run
+        )
+        if ok_rules:
+            rules_trades_count += 1
+        else:
+            skipped_count += 1
+
+        # 2. LLM Trade (if llm_bias exists)
+        llm_b = sig.get("llm_bias")
+        if llm_b:
+            llm_bias = str(llm_b).upper()
+            llm_type = "CE" if llm_bias == "BULLISH" else "PE"
+            llm_strike = sig_strike if sig_type == llm_type else round(float(sig.get("spot_price") or 22500) / 50.0) * 50.0
+            ok_llm = _simulate_and_insert_trade(
+                client=client,
+                sig_id=sig_id,
+                source="LLM",
+                target_strike=llm_strike if llm_bias != "NEUTRAL" else sig_strike,
+                target_type=llm_type if llm_bias != "NEUTRAL" else sig_type,
+                sig_exp=sig_exp,
+                bias_used=llm_bias,
+                fired_at=fired_at,
+                is_late=is_late,
+                dry_run=dry_run
+            )
+            if ok_llm:
+                llm_trades_count += 1
 
     logger.info("==================================================")
-    logger.info("✅ Backfill Complete: %d trades created (%d skipped without ticks)",
-                trades_created, skipped_count)
+    logger.info("✅ Backfill Complete:")
+    logger.info("   RULES trades: %d", rules_trades_count)
+    logger.info("   LLM trades:   %d", llm_trades_count)
+    logger.info("   Total trades: %d (skipped without ticks: %d)",
+                rules_trades_count + llm_trades_count, skipped_count)
     logger.info("==================================================")
 
 
