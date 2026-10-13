@@ -41,15 +41,25 @@ BOOTSTRAP_STRENGTH_SCALE = 5.0
 def _pre_filter(rows: list[dict], spot: float) -> list[dict]:
     """
     Remove rows that shouldn't be analysed:
-    1. oi_change IS NULL (first flush of day)
-    2. Deep ITM (>10% from spot)
-    3. Expiry in the past (< today)
-    4. Negligible OI or volume
+    1. Restrict strictly to nearest active weekly expiry (matches market context walls)
+    2. oi_change IS NULL (first flush of day)
+    3. Deep ITM (>10% from spot)
+    4. Expiry in the past (< today)
+    5. Negligible OI or volume
     """
     today = date.today()
-    filtered = []
+    today_str = today.isoformat()
 
+    # Restrict detector strictly to nearest active weekly contract (no mixing with monthly/far-dated)
+    expiries = sorted(list(set([r["expiry"] for r in rows if r.get("expiry")])))
+    valid_expiries = [e for e in expiries if e >= today_str]
+    target_expiry = valid_expiries[0] if valid_expiries else (expiries[0] if expiries else None)
+
+    filtered = []
     for r in rows:
+        if target_expiry and r.get("expiry") != target_expiry:
+            continue
+
         if r.get("oi_change") is None:
             continue
 

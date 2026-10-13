@@ -10,7 +10,7 @@
 # 4. volume_delta is non-negative incremental 5-min volume.
 
 import logging
-from datetime import datetime, date, timezone
+from datetime import datetime, date, timezone, timedelta
 from collections import defaultdict
 import pytz
 import numpy as np
@@ -19,6 +19,38 @@ import db_supabase
 
 logger = logging.getLogger(__name__)
 IST = pytz.timezone("Asia/Kolkata")
+
+# NSE Trading Holidays 2026
+NSE_HOLIDAYS_2026 = {
+    date(2026, 1, 26),   # Republic Day
+    date(2026, 3, 3),    # Holi
+    date(2026, 3, 20),   # Id-ul-Fitr
+    date(2026, 4, 3),    # Good Friday
+    date(2026, 4, 14),   # Dr. Ambedkar Jayanti
+    date(2026, 5, 1),    # Maharashtra Day
+    date(2026, 5, 27),   # Bakri Id
+    date(2026, 6, 26),   # Muharram
+    date(2026, 10, 2),   # Mahatma Gandhi Jayanti
+    date(2026, 10, 20),  # Dussehra (Expiry preponed to Mon Oct 19)
+    date(2026, 11, 10),  # Diwali Laxmi Pujan
+    date(2026, 11, 24),  # Gurunanak Jayanti
+}
+
+
+def compute_trading_dte(trade_d: date, exp_d: date) -> int:
+    """
+    Computes trading sessions remaining until expiry.
+    Returns 0 on the expiry session itself.
+    """
+    if trade_d >= exp_d:
+        return 0
+    cur = trade_d + timedelta(days=1)
+    trading_days = 0
+    while cur <= exp_d:
+        if cur.weekday() < 5 and cur not in NSE_HOLIDAYS_2026:
+            trading_days += 1
+        cur += timedelta(days=1)
+    return trading_days
 
 
 def archive_daily_strike_stats(trade_date: str, dry_run: bool = False) -> int:
@@ -69,8 +101,8 @@ def archive_daily_strike_stats(trade_date: str, dry_run: bool = False) -> int:
     target_expiry = valid_expiries[0]
     trade_d = date.fromisoformat(trade_date)
     exp_d = date.fromisoformat(target_expiry)
-    dte = max(0, (exp_d - trade_d).days)
-    logger.info("Selected nearest weekly expiry: %s (DTE: %d)", target_expiry, dte)
+    dte = compute_trading_dte(trade_d, exp_d)
+    logger.info("Selected nearest weekly expiry: %s (Trading-Day DTE: %d)", target_expiry, dte)
 
     # 3. Filter strictly to target expiry
     expiry_rows = [r for r in all_rows if r.get("expiry") == target_expiry]
