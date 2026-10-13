@@ -121,7 +121,7 @@ def _build_signal(fired_at: str, symbol: str, row: dict, signal_type: str,
         "spot_price":      row.get("spot_price"),
         "bias":            bias,
         "mode":            mode,
-        "entry_premium":   round(entry_prem, 2) if entry_prem > 0 else None,
+        "entry_premium":   None,  # Evaluated at strict t+1 snapshot by resolver.fill_pending_entries
         "dte":             dte,
         "is_expiry_day":   is_expiry_day,
         "target_pct":      0.30,
