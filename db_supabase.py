@@ -16,9 +16,15 @@ load_dotenv()
 logger = logging.getLogger(__name__)
 
 SUPABASE_URL = os.getenv("SUPABASE_URL")
-SUPABASE_KEY = os.getenv("SUPABASE_KEY")
+SUPABASE_SERVICE_ROLE_KEY = os.getenv("SUPABASE_SERVICE_ROLE_KEY")
+SUPABASE_KEY = SUPABASE_SERVICE_ROLE_KEY or os.getenv("SUPABASE_KEY")
 
 _client: Client | None = None
+
+ALLOWED_OPTIONS_COLS = {
+    "timestamp", "symbol", "expiry", "strike", "option_type",
+    "oi", "oi_change", "volume", "iv", "last_price", "spot_price"
+}
 
 
 def get_supabase() -> Client:
@@ -43,13 +49,14 @@ def insert_options_rows_supabase(rows: list[dict]) -> None:
     if not rows:
         return
     client = get_supabase()
+    clean_rows = [{k: v for k, v in r.items() if k in ALLOWED_OPTIONS_COLS} for r in rows]
     try:
         client.table("options_chain").upsert(
-            rows,
+            clean_rows,
             on_conflict="timestamp,symbol,expiry,strike,option_type",
             ignore_duplicates=True,
         ).execute()
-        logger.info("Supabase: %d rows upserted to options_chain", len(rows))
+        logger.info("Supabase: %d rows upserted to options_chain", len(clean_rows))
     except Exception as e:
         logger.error("Supabase upsert failed: %s", e)
         raise
@@ -237,15 +244,13 @@ def get_intraday_oi_changes_supabase(symbol: str, date_str: str) -> list[dict]:
 
 
 
-def get_latest_oi_snapshot_supabase(symbol: str) -> dict[tuple, int]:
+def get_latest_snapshot_supabase(symbol: str) -> dict[tuple, dict]:
     """
-    Returns {(strike, option_type, expiry): oi} for the most recent
-    timestamp in Supabase for the given symbol.
-    Used by flush_to_db() to compute oi_change.
+    Returns {(strike, option_type, expiry): {"oi": oi, "last_price": last_price, "volume": volume}}
+    for the most recent timestamp in Supabase for the given symbol.
     """
     client = get_supabase()
     try:
-        # Get the most recent timestamp
         latest_res = (
             client.table("options_chain")
             .select("timestamp")
@@ -258,22 +263,148 @@ def get_latest_oi_snapshot_supabase(symbol: str) -> dict[tuple, int]:
             return {}
 
         latest_ts = latest_res.data[0]["timestamp"]
-
-        # Get all rows for that timestamp
         res = (
             client.table("options_chain")
-            .select("strike,option_type,expiry,oi")
+            .select("strike,option_type,expiry,oi,last_price,volume")
             .eq("symbol", symbol)
             .eq("timestamp", latest_ts)
             .execute()
         )
         return {
-            (float(r["strike"]), r["option_type"], r["expiry"]): r["oi"]
+            (float(r["strike"]), r["option_type"], r["expiry"]): {
+                "oi": r.get("oi"),
+                "last_price": r.get("last_price"),
+                "volume": r.get("volume"),
+            }
             for r in (res.data or [])
         }
     except Exception as e:
-        logger.error("Supabase get_latest_oi_snapshot failed: %s", e)
+        logger.error("Supabase get_latest_snapshot failed: %s", e)
         return {}
+
+
+def get_latest_oi_snapshot_supabase(symbol: str) -> dict[tuple, int]:
+    """
+    Returns {(strike, option_type, expiry): oi} for the most recent
+    timestamp in Supabase for the given symbol.
+    """
+    snap = get_latest_snapshot_supabase(symbol)
+    return {k: (v.get("oi") if isinstance(v, dict) else v) for k, v in snap.items()}
+
+
+def get_prior_snapshot_supabase(symbol: str, before_timestamp: str) -> dict[tuple, dict]:
+    """
+    Returns {(strike, option_type, expiry): {"oi": oi, "last_price": last_price, "volume": volume}}
+    for the snapshot immediately preceding before_timestamp.
+    """
+    client = get_supabase()
+    try:
+        prior_res = (
+            client.table("options_chain")
+            .select("timestamp")
+            .eq("symbol", symbol)
+            .lt("timestamp", before_timestamp)
+            .order("timestamp", desc=True)
+            .limit(1)
+            .execute()
+        )
+        if not prior_res.data:
+            return {}
+
+        prior_ts = prior_res.data[0]["timestamp"]
+        res = (
+            client.table("options_chain")
+            .select("strike,option_type,expiry,oi,last_price,volume")
+            .eq("symbol", symbol)
+            .eq("timestamp", prior_ts)
+            .execute()
+        )
+        return {
+            (float(r["strike"]), r["option_type"], r["expiry"]): {
+                "oi": r.get("oi"),
+                "last_price": r.get("last_price"),
+                "volume": r.get("volume"),
+            }
+            for r in (res.data or [])
+        }
+    except Exception as e:
+        logger.error("Supabase get_prior_snapshot failed: %s", e)
+        return {}
+
+
+def insert_trade_supabase(trade: dict) -> int | None:
+    """
+    Insert a trade execution row into trades table.
+    """
+    if not trade:
+        return None
+    client = get_supabase()
+    allowed_cols = {
+        "signal_id", "source", "strike", "option_type", "expiry",
+        "bias_used", "entry_at", "entry_premium", "exit_premium",
+        "exit_reason", "target_pct", "stop_pct", "net_pnl_pct",
+        "mfe", "mae", "resolved_at", "stale_ltp", "thesis_at", "is_exploratory"
+    }
+    clean = {k: v for k, v in trade.items() if k in allowed_cols}
+    try:
+        res = client.table("trades").insert([clean]).execute()
+        return res.data[0]["id"] if res.data else None
+    except Exception as e:
+        logger.error("Supabase insert_trade failed: %s", e)
+        return None
+
+
+def update_trade_supabase(trade_id: int, updates: dict) -> bool:
+    """
+    Update a trade row in trades table by id.
+    """
+    if not trade_id or not updates:
+        return False
+    client = get_supabase()
+    allowed_cols = {
+        "exit_premium", "exit_reason", "net_pnl_pct",
+        "mfe", "mae", "resolved_at", "stale_ltp"
+    }
+    clean = {k: v for k, v in updates.items() if k in allowed_cols}
+    try:
+        client.table("trades").update(clean).eq("id", trade_id).execute()
+        return True
+    except Exception as e:
+        logger.error("Supabase update_trade failed for id=%s: %s", trade_id, e)
+        return False
+
+
+def insert_strike_daily_stats_supabase(rows: list[dict]) -> int:
+    """
+    Batch upsert or insert rows into strike_daily_stats table.
+    """
+    if not rows:
+        return 0
+    client = get_supabase()
+    allowed_cols = {
+        "trade_date", "strike_offset", "option_type",
+        "time_bucket", "dte", "volume", "volume_delta", "oi_change"
+    }
+    clean_rows = [{k: v for k, v in r.items() if k in allowed_cols} for r in rows]
+    total = 0
+    batch_size = 500
+    for i in range(0, len(clean_rows), batch_size):
+        chunk = clean_rows[i:i + batch_size]
+        try:
+            client.table("strike_daily_stats").upsert(
+                chunk,
+                on_conflict="trade_date,strike_offset,option_type,time_bucket",
+                ignore_duplicates=False,
+            ).execute()
+            total += len(chunk)
+        except Exception as e:
+            logger.debug("Upsert not permitted or conflict target mismatch, falling back to insert: %s", e)
+            try:
+                client.table("strike_daily_stats").insert(chunk).execute()
+                total += len(chunk)
+            except Exception as e2:
+                logger.error("Supabase insert_strike_daily_stats failed: %s", e2)
+    return total
 
 
 def get_rows_for_date_supabase(date_str: str) -> list[dict]:

@@ -21,7 +21,7 @@ from SmartApi import SmartConnect
 from SmartApi.smartWebSocketV2 import SmartWebSocketV2
 
 from db import get_latest_oi_snapshot, insert_options_rows
-from db_supabase import insert_options_rows_supabase, get_latest_oi_snapshot_supabase
+from db_supabase import insert_options_rows_supabase, get_latest_oi_snapshot_supabase, get_latest_snapshot_supabase
 from angel_fetcher import fetch_and_store as _angel_fetch_and_store
 
 # Import internal helpers directly by loading the module
@@ -214,10 +214,10 @@ def flush_to_db(symbol: str) -> list[dict]:
         spot = None
 
     timestamp = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
-    # Try Supabase first for OI baseline, fall back to local SQLite
-    prev_oi = get_latest_oi_snapshot_supabase(symbol)
-    if not prev_oi:
-        prev_oi = get_latest_oi_snapshot(symbol)
+    # Try Supabase first for snapshot baseline, fall back to local SQLite
+    prev_snapshot = get_latest_snapshot_supabase(symbol)
+    if not prev_snapshot:
+        prev_snapshot = get_latest_oi_snapshot(symbol)
 
     rows = []
 
@@ -238,21 +238,35 @@ def flush_to_db(symbol: str) -> list[dict]:
         )
 
         key       = (scrip["strike"], scrip["option_type"], scrip["expiry"])
-        prev      = prev_oi.get(key)
-        oi_change = (oi - prev) if (oi is not None and prev is not None) else None
+        prev_data = prev_snapshot.get(key)
+        if isinstance(prev_data, dict):
+            prev_oi = prev_data.get("oi")
+            prev_price = prev_data.get("last_price")
+            prev_vol = prev_data.get("volume")
+        else:
+            prev_oi = prev_data
+            prev_price = None
+            prev_vol = None
+
+        oi_change = (oi - prev_oi) if (oi is not None and prev_oi is not None) else None
+        vol_change = (volume - prev_vol) if (volume is not None and prev_vol is not None) else None
+        price_change_pct = ((ltp - prev_price) / prev_price) if (ltp is not None and prev_price and prev_price > 0) else None
 
         rows.append({
-            "timestamp":   timestamp,
-            "symbol":      symbol,
-            "expiry":      scrip["expiry"],
-            "strike":      scrip["strike"],
-            "option_type": scrip["option_type"],
-            "oi":          oi,
-            "oi_change":   oi_change,
-            "volume":      volume,
-            "iv":          iv,
-            "last_price":  ltp,
-            "spot_price":  spot,
+            "timestamp":        timestamp,
+            "symbol":           symbol,
+            "expiry":           scrip["expiry"],
+            "strike":           scrip["strike"],
+            "option_type":      scrip["option_type"],
+            "oi":               oi,
+            "oi_change":        oi_change,
+            "volume":           volume,
+            "volume_delta":     vol_change,
+            "iv":               iv,
+            "last_price":       ltp,
+            "prev_price":       prev_price,
+            "price_change_pct": price_change_pct,
+            "spot_price":       spot,
         })
 
     if rows:

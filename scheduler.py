@@ -70,6 +70,23 @@ def _export_job():
         logger.error("export_job error: %s", e)
 
 
+def _archive_daily_strike_stats_job():
+    from holidays import is_market_holiday
+    is_hol, reason = is_market_holiday()
+    if is_hol:
+        logger.info("archive_daily_strike_stats_job skipped: today is %s", reason)
+        return
+    from datetime import date
+    from stats_archiver import archive_daily_strike_stats
+    today_str = date.today().isoformat()
+    logger.info("⏰ archive_daily_strike_stats_job fired — archiving 5-min intervals for %s", today_str)
+    try:
+        count = archive_daily_strike_stats(today_str)
+        logger.info("Daily strike stats archiving completed: %d rows", count)
+    except Exception as e:
+        logger.error("archive_daily_strike_stats_job error: %s", e)
+
+
 # def _shutdown_job():
 #     logger.info("⏰ shutdown_job fired — market closed, stopping scheduler")
 #     if _scheduler:
@@ -115,6 +132,18 @@ def start_scheduler() -> BackgroundScheduler:
         minute=EXPORT_MINUTE,
         id="export_job",
         name="End-of-day CSV export",
+        misfire_grace_time=300,
+    )
+
+    # 3:31 PM IST (15:31) — archive daily strike stats for 20-day rolling baseline
+    _scheduler.add_job(
+        _archive_daily_strike_stats_job,
+        trigger="cron",
+        day_of_week="mon-fri",
+        hour=15,
+        minute=31,
+        id="archive_daily_strike_stats_job",
+        name="Daily strike stats archiving",
         misfire_grace_time=300,
     )
 

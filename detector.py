@@ -72,6 +72,9 @@ def _pre_filter(rows: list[dict], spot: float) -> list[dict]:
     return filtered
 
 
+NOISE_PRICE_CHANGE_PCT   = 0.02  # 2.0% minimum relative premium move to filter theta/noise
+
+
 def _percentile_strength(value: float, population: list[float]) -> float:
     if not population:
         return 1.0
@@ -114,6 +117,7 @@ def _build_signal(fired_at: str, symbol: str, row: dict, signal_type: str,
         "target_pct":      0.30,
         "stop_pct":        -0.20,
         "is_exploratory":  False,
+        "logic_version":   "v2_quadrant",
         "llm_thesis":      None,
         "llm_bias":        None,
         "llm_confidence":  None,
@@ -121,7 +125,7 @@ def _build_signal(fired_at: str, symbol: str, row: dict, signal_type: str,
     }
 
 
-def _detect_oi_flow(rows, symbol, spot, today, now_utc, mode, intraday_rows):
+def _detect_oi_flow(rows, symbol, spot, today, now_utc, mode, intraday_rows, prior_snapshot_map=None):
     signals = []
     all_changes = [
         abs(r["oi_change"]) for r in intraday_rows
@@ -142,6 +146,9 @@ def _detect_oi_flow(rows, symbol, spot, today, now_utc, mode, intraday_rows):
         oi_change = r.get("oi_change")
         volume = r.get("volume") or 0
         oi = r.get("oi") or 0
+        opt_type = r.get("option_type")
+        strike = float(r.get("strike") or 0)
+        expiry = r.get("expiry")
 
         if not oi_change or oi_change == 0:
             continue
@@ -152,14 +159,47 @@ def _detect_oi_flow(rows, symbol, spot, today, now_utc, mode, intraday_rows):
         if abs_change < threshold or not volume_confirms:
             continue
 
+        # Optional volume delta confirmation if available
+        vol_delta = r.get("volume_delta")
+        if vol_delta is not None and vol_delta <= 0:
+            continue
+
         strength = _percentile_strength(abs_change, all_changes)
 
-        if oi_change > 0:
+        # 4-Quadrant Bias Engine:
+        # Determine relative price change over the 5-min window
+        price_change_pct = r.get("price_change_pct")
+        if price_change_pct is None:
+            prev_price = r.get("prev_price")
+            if prev_price is None and prior_snapshot_map:
+                prev_data = prior_snapshot_map.get((strike, opt_type, expiry))
+                if prev_data:
+                    prev_price = prev_data.get("last_price") if isinstance(prev_data, dict) else prev_data
+            curr_ltp = float(r.get("last_price") or 0)
+            if prev_price and prev_price > 0 and curr_ltp > 0:
+                price_change_pct = (curr_ltp - prev_price) / prev_price
+
+        # Quadrant classification with noise threshold
+        if price_change_pct is None or abs(price_change_pct) < NOISE_PRICE_CHANGE_PCT:
+            # Noise / flat move -> non-directional
+            bias = "NEUTRAL"
+            signal_type = "OI_BUILDUP" if oi_change > 0 else "OI_UNWIND"
+        elif oi_change > 0:
             signal_type = "OI_BUILDUP"
-            bias = "BULLISH" if r.get("option_type") == "CE" else "BEARISH"
-        else:
+            if price_change_pct >= NOISE_PRICE_CHANGE_PCT:
+                # Long Buildup: Call Buying (Bullish), Put Buying (Bearish)
+                bias = "BULLISH" if opt_type == "CE" else "BEARISH"
+            else:
+                # Short Buildup: Call Writing (Bearish), Put Writing (Bullish)
+                bias = "BEARISH" if opt_type == "CE" else "BULLISH"
+        else:  # oi_change < 0
             signal_type = "OI_UNWIND"
-            bias = "BEARISH" if r.get("option_type") == "CE" else "BULLISH"
+            if price_change_pct >= NOISE_PRICE_CHANGE_PCT:
+                # Short Covering: Call Short Covering (Bullish), Put Short Covering (Bearish)
+                bias = "BULLISH" if opt_type == "CE" else "BEARISH"
+            else:
+                # Long Unwinding: Call Long Unwinding (Bearish), Put Long Unwinding (Bullish)
+                bias = "BEARISH" if opt_type == "CE" else "BULLISH"
 
         signals.append(_build_signal(now_utc, symbol, r, signal_type, strength, bias, mode))
 
@@ -263,7 +303,8 @@ def _remove_offsetting_signals(signals: list[dict]) -> list[dict]:
 
 # ── Main Entry Point ───────────────────────────────────────────────────────────
 
-def run_detection(symbol: str, current_rows: list[dict] | None = None) -> list[dict]:
+def run_detection(symbol: str, current_rows: list[dict] | None = None,
+                  prior_snapshot_map: dict | None = None) -> list[dict]:
     """
     Run full anomaly detection pipeline for a symbol.
     Persists new signals into both Supabase and local SQLite.
@@ -300,9 +341,15 @@ def run_detection(symbol: str, current_rows: list[dict] | None = None) -> list[d
 
     intraday_rows = db.get_intraday_oi_changes(symbol, today)
 
+    if prior_snapshot_map is None:
+        try:
+            prior_snapshot_map = db_supabase.get_latest_snapshot_supabase(symbol)
+        except Exception:
+            prior_snapshot_map = {}
+
     # Detect anomalies
     candidates = []
-    candidates += _detect_oi_flow(filtered, symbol, spot, today, now_utc, mode, intraday_rows)
+    candidates += _detect_oi_flow(filtered, symbol, spot, today, now_utc, mode, intraday_rows, prior_snapshot_map)
     candidates += _detect_volume_spike(filtered, symbol, spot, today, now_utc, mode, intraday_rows)
     candidates += _detect_iv_spike(filtered, symbol, spot, today, now_utc, intraday_rows)
 

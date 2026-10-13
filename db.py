@@ -64,9 +64,20 @@ def _run_init_schema(conn: sqlite3.Connection) -> None:
             llm_thesis       TEXT,
             llm_bias         TEXT,
             llm_confidence   INTEGER,
-            news_summary_id  INTEGER
+            news_summary_id  INTEGER,
+            logic_version    TEXT,
+            is_exploratory   INTEGER DEFAULT 0
         )
     """)
+
+    try:
+        cursor.execute("ALTER TABLE signals ADD COLUMN logic_version TEXT")
+    except Exception:
+        pass
+    try:
+        cursor.execute("ALTER TABLE signals ADD COLUMN is_exploratory INTEGER DEFAULT 0")
+    except Exception:
+        pass
 
     cursor.execute("""
         CREATE TABLE IF NOT EXISTS news_raw (
@@ -287,12 +298,14 @@ def insert_signal_local(signal: dict) -> int:
             (fired_at, symbol, expiry, strike, option_type,
              signal_type, signal_strength, oi_change, volume,
              iv, spot_price, bias, mode,
-             llm_thesis, llm_bias, llm_confidence, news_summary_id)
+             llm_thesis, llm_bias, llm_confidence, news_summary_id,
+             logic_version, is_exploratory)
         VALUES
             (:fired_at, :symbol, :expiry, :strike, :option_type,
              :signal_type, :signal_strength, :oi_change, :volume,
              :iv, :spot_price, :bias, :mode,
-             :llm_thesis, :llm_bias, :llm_confidence, :news_summary_id)
+             :llm_thesis, :llm_bias, :llm_confidence, :news_summary_id,
+             :logic_version, :is_exploratory)
     """, signal)
     conn.commit()
     sig_id = cursor.lastrowid
