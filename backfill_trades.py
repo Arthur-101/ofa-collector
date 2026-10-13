@@ -96,6 +96,7 @@ def _simulate_and_insert_trade(client, sig_id: int, source: str, target_strike: 
         trade_row = {
             "signal_id": sig_id,
             "source": source,
+            "symbol": "NIFTY",
             "strike": target_strike,
             "option_type": target_type,
             "expiry": sig_exp,
@@ -142,6 +143,7 @@ def _simulate_and_insert_trade(client, sig_id: int, source: str, target_strike: 
         trade_row = {
             "signal_id": sig_id,
             "source": source,
+            "symbol": "NIFTY",
             "strike": target_strike,
             "option_type": target_type,
             "expiry": sig_exp,
@@ -194,6 +196,7 @@ def _simulate_and_insert_trade(client, sig_id: int, source: str, target_strike: 
         trade_row = {
             "signal_id": sig_id,
             "source": source,
+            "symbol": "NIFTY",
             "strike": target_strike,
             "option_type": target_type,
             "expiry": sig_exp,
@@ -220,6 +223,7 @@ def _simulate_and_insert_trade(client, sig_id: int, source: str, target_strike: 
         trade_row = {
             "signal_id": sig_id,
             "source": source,
+            "symbol": "NIFTY",
             "strike": target_strike,
             "option_type": target_type,
             "expiry": sig_exp,
@@ -283,6 +287,7 @@ def _simulate_and_insert_trade(client, sig_id: int, source: str, target_strike: 
     trade_row = {
         "signal_id": sig_id,
         "source": source,
+        "symbol": "NIFTY",
         "strike": target_strike,
         "option_type": target_type,
         "expiry": sig_exp,

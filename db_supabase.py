@@ -384,12 +384,13 @@ def insert_trade_supabase(trade: dict) -> int | None:
         )
     client = get_supabase()
     allowed_cols = {
-        "signal_id", "source", "strike", "option_type", "expiry",
+        "signal_id", "source", "symbol", "strike", "option_type", "expiry",
         "bias_used", "entry_at", "entry_premium", "exit_premium",
         "exit_reason", "target_pct", "stop_pct", "net_pnl_pct",
         "mfe", "mae", "resolved_at", "stale_ltp", "thesis_at", "is_exploratory"
     }
     clean = {k: v for k, v in trade.items() if k in allowed_cols}
+    clean.setdefault("symbol", trade.get("symbol") or "NIFTY")
     try:
         res = client.table("trades").insert([clean]).execute()
         return res.data[0]["id"] if res.data else None

@@ -103,6 +103,27 @@ def fill_pending_entries(symbol: str, current_rows: list[dict], now_utc: str) ->
 
         # 1. RULES TRADE
         if bias == "NEUTRAL":
+            db_supabase.insert_trade_supabase({
+                "signal_id": sig_id,
+                "source": "RULES",
+                "symbol": symbol,
+                "strike": sig_strike,
+                "option_type": sig_type,
+                "expiry": sig_exp,
+                "bias_used": bias,
+                "entry_at": now_utc,
+                "entry_premium": 0.0,
+                "exit_premium": 0.0,
+                "exit_reason": "NON_DIRECTIONAL",
+                "target_pct": TARGET_PCT,
+                "stop_pct": STOP_PCT,
+                "net_pnl_pct": 0.0,
+                "mfe": 0.0,
+                "mae": 0.0,
+                "resolved_at": now_utc,
+                "stale_ltp": False,
+                "is_exploratory": False,
+            })
             try:
                 client.table("signals").update({
                     "entry_premium": 0.0,
@@ -131,6 +152,7 @@ def fill_pending_entries(symbol: str, current_rows: list[dict], now_utc: str) ->
                     db_supabase.insert_trade_supabase({
                         "signal_id": sig_id,
                         "source": "RULES",
+                        "symbol": symbol,
                         "strike": float(row_opt.get("strike", 0)),
                         "option_type": row_opt.get("option_type"),
                         "expiry": row_opt.get("expiry"),
@@ -165,6 +187,7 @@ def fill_pending_entries(symbol: str, current_rows: list[dict], now_utc: str) ->
                     db_supabase.insert_trade_supabase({
                         "signal_id": sig_id,
                         "source": "RULES",
+                        "symbol": symbol,
                         "strike": float(row_opt.get("strike", 0)),
                         "option_type": row_opt.get("option_type"),
                         "expiry": row_opt.get("expiry"),
@@ -199,6 +222,7 @@ def fill_pending_entries(symbol: str, current_rows: list[dict], now_utc: str) ->
                     db_supabase.insert_trade_supabase({
                         "signal_id": sig_id,
                         "source": "RULES",
+                        "symbol": symbol,
                         "strike": float(row_opt.get("strike", 0)),
                         "option_type": row_opt.get("option_type"),
                         "expiry": row_opt.get("expiry"),
@@ -239,6 +263,7 @@ def fill_pending_entries(symbol: str, current_rows: list[dict], now_utc: str) ->
                     db_supabase.insert_trade_supabase({
                         "signal_id": sig_id,
                         "source": "LLM",
+                        "symbol": symbol,
                         "strike": float(llm_opt.get("strike", 0)),
                         "option_type": llm_opt.get("option_type"),
                         "expiry": llm_opt.get("expiry"),
@@ -261,6 +286,7 @@ def fill_pending_entries(symbol: str, current_rows: list[dict], now_utc: str) ->
                     db_supabase.insert_trade_supabase({
                         "signal_id": sig_id,
                         "source": "LLM",
+                        "symbol": symbol,
                         "strike": float(llm_opt.get("strike", 0)),
                         "option_type": llm_opt.get("option_type"),
                         "expiry": llm_opt.get("expiry"),
