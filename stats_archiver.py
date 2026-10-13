@@ -103,6 +103,10 @@ def archive_daily_strike_stats(trade_date: str, dry_run: bool = False) -> int:
         except Exception:
             time_bucket = ts[11:16]
 
+        # Clamp strictly to Indian market trading hours (09:15 to 15:30 IST)
+        if not ("09:15" <= time_bucket <= "15:30"):
+            continue
+
         # Determine spot and ATM strike for this interval
         spots = [float(r["spot_price"]) for r in interval_rows if r.get("spot_price") and float(r["spot_price"]) > 0]
         if not spots:
@@ -116,9 +120,9 @@ def archive_daily_strike_stats(trade_date: str, dry_run: bool = False) -> int:
             if not opt_type or strike <= 0:
                 continue
 
-            strike_offset = int(round(strike - atm_strike))
-            # Keep 31 ATM strikes (-750 to +750 points, in 50-pt steps)
-            if abs(strike_offset) > 750:
+            # Store discrete step offsets (-15 to +15 in 50-pt increments)
+            strike_offset = int(round((strike - atm_strike) / 50.0))
+            if abs(strike_offset) > 15:
                 continue
 
             vol = int(r.get("volume") or 0)
@@ -146,13 +150,20 @@ def archive_daily_strike_stats(trade_date: str, dry_run: bool = False) -> int:
                 "oi_change": oi_change,
             })
 
-    logger.info("Generated %d strike_daily_stats records for %s", len(stat_rows), trade_date)
+    # Deduplicate strictly on unique key: (trade_date, strike_offset, option_type, time_bucket)
+    deduped = {}
+    for r in stat_rows:
+        k = (r["trade_date"], r["strike_offset"], r["option_type"], r["time_bucket"])
+        deduped[k] = r
+    final_rows = list(deduped.values())
+
+    logger.info("Generated %d unique strike_daily_stats records for %s", len(final_rows), trade_date)
 
     if dry_run:
-        return len(stat_rows)
+        return len(final_rows)
 
     # 6. Insert into Supabase
-    inserted = db_supabase.insert_strike_daily_stats_supabase(stat_rows)
+    inserted = db_supabase.insert_strike_daily_stats_supabase(final_rows)
     logger.info("✅ Archived %d strike_daily_stats rows to Supabase for %s", inserted, trade_date)
     return inserted
 
@@ -162,21 +173,23 @@ def seed_all_historical_stats(dry_run: bool = False) -> dict:
     Seed strike_daily_stats across all trading dates stored in options_chain.
     """
     client = db_supabase.get_supabase()
-    # Discover distinct trade dates
+    # Discover distinct trade dates with proper PostgREST pagination (batch_size=1000)
     dates_found = set()
     offset = 0
-    batch_size = 5000
+    batch_size = 1000
     while True:
         try:
             res = client.table("options_chain").select("timestamp").order("timestamp", desc=False).range(offset, offset + batch_size - 1).execute()
             batch = res.data or []
+            if not batch:
+                break
             for r in batch:
                 ts = r.get("timestamp")
                 if ts:
                     dates_found.add(ts[:10])
             if len(batch) < batch_size:
                 break
-            offset += batch_size
+            offset += len(batch)
         except Exception as e:
             logger.error("Error discovering dates: %s", e)
             break

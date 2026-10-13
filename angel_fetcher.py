@@ -147,7 +147,7 @@ def _load_instruments(symbol: str, spot: float) -> list[dict]:
     filtered = [
         p for p in _instruments_cache
         if p["name"] == symbol
-        and p["expiry_date"] > min_dte
+        and p["expiry_date"] >= min_dte
         and lo <= p["strike"] <= hi
     ]
 

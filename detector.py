@@ -30,7 +30,7 @@ FULL_VOLUME_ZSCORE     = 3.0   # volume > mean + 3σ
 FULL_IV_MULTIPLIER     = 1.5   # iv > 1.5x session average
 
 DEEP_ITM_PCT            = 0.10  # >10% away from spot = deep ITM
-MIN_DTE                 = 2     # skip expiries within 2 days
+MIN_DTE                 = 0     # 0 = analyze today's expiry contracts
 MIN_OI                  = 1000  # skip strikes with negligible OI
 MIN_VOLUME              = 500   # skip strikes with negligible volume
 VOLUME_OI_CONFIRM_RATIO = 0.01  # volume > 1% of OI = real flow
@@ -43,7 +43,7 @@ def _pre_filter(rows: list[dict], spot: float) -> list[dict]:
     Remove rows that shouldn't be analysed:
     1. oi_change IS NULL (first flush of day)
     2. Deep ITM (>10% from spot)
-    3. Expiry within MIN_DTE days
+    3. Expiry in the past (< today)
     4. Negligible OI or volume
     """
     today = date.today()
@@ -59,7 +59,7 @@ def _pre_filter(rows: list[dict], spot: float) -> list[dict]:
 
         try:
             exp = date.fromisoformat(r["expiry"])
-            if (exp - today).days <= MIN_DTE:
+            if (exp - today).days < 0:
                 continue
         except (ValueError, TypeError):
             pass

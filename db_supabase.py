@@ -5,8 +5,11 @@
 # Uses idempotent upsert (ignore_duplicates=True) for zero duplicates.
 
 import os
+import json
+import base64
 import logging
 from pathlib import Path
+from datetime import datetime, timezone
 from supabase import create_client, Client
 from dotenv import load_dotenv
 import numpy as np
@@ -20,6 +23,40 @@ SUPABASE_SERVICE_ROLE_KEY = os.getenv("SUPABASE_SERVICE_ROLE_KEY")
 SUPABASE_KEY = SUPABASE_SERVICE_ROLE_KEY or os.getenv("SUPABASE_KEY")
 
 _client: Client | None = None
+
+def _is_anon_jwt(token: str | None) -> bool:
+    """Check if JWT token has role 'anon'."""
+    if not token:
+        return True
+    try:
+        parts = token.split(".")
+        if len(parts) >= 2:
+            padded = parts[1] + "=" * ((4 - len(parts[1]) % 4) % 4)
+            payload = json.loads(base64.urlsafe_b64decode(padded))
+            return payload.get("role") == "anon"
+    except Exception:
+        pass
+    return False
+
+def verify_credentials() -> None:
+    """
+    Ensure the collector is configured with SUPABASE_SERVICE_ROLE_KEY.
+    Fails loudly at startup if only anon key is present.
+    """
+    if not SUPABASE_URL:
+        raise RuntimeError("CRITICAL: SUPABASE_URL must be set in environment")
+    if not SUPABASE_SERVICE_ROLE_KEY:
+        raise RuntimeError(
+            "CRITICAL STARTUP ERROR: SUPABASE_SERVICE_ROLE_KEY is missing from environment! "
+            "The ofa-collector backend requires the service_role key to bypass RLS policies "
+            "on 'trades' and 'strike_daily_stats'. Set SUPABASE_SERVICE_ROLE_KEY in .env and Render env vars."
+        )
+    if _is_anon_jwt(SUPABASE_SERVICE_ROLE_KEY):
+        raise RuntimeError(
+            "CRITICAL STARTUP ERROR: SUPABASE_SERVICE_ROLE_KEY has role 'anon'! "
+            "You provided the public anon key instead of the secret service_role key. "
+            "Get the service_role key from Supabase Dashboard -> Settings -> API -> Project API keys."
+        )
 
 ALLOWED_OPTIONS_COLS = {
     "timestamp", "symbol", "expiry", "strike", "option_type",
@@ -36,7 +73,8 @@ def get_supabase() -> Client:
                 "SUPABASE_URL and SUPABASE_KEY must be set in environment"
             )
         _client = create_client(SUPABASE_URL, SUPABASE_KEY)
-        logger.info("Supabase client initialised for %s", SUPABASE_URL)
+        role = "anon" if _is_anon_jwt(SUPABASE_KEY) else "service_role"
+        logger.info("Supabase client initialised for %s (role: %s)", SUPABASE_URL, role)
     return _client
 
 
@@ -97,6 +135,7 @@ def update_signal_thesis_supabase(signal_id: int, thesis_data: dict) -> bool:
             "llm_thesis": thesis_data.get("thesis"),
             "llm_bias": thesis_data.get("bias"),
             "llm_confidence": thesis_data.get("confidence"),
+            "thesis_at": thesis_data.get("thesis_at") or datetime.now(timezone.utc).isoformat(),
         }).eq("id", signal_id).execute()
         logger.info("Supabase: signal %d updated with LLM thesis (%s, conf %s)",
                     signal_id, thesis_data.get("bias"), thesis_data.get("confidence"))
@@ -338,6 +377,11 @@ def insert_trade_supabase(trade: dict) -> int | None:
     """
     if not trade:
         return None
+    if _is_anon_jwt(SUPABASE_KEY):
+        raise RuntimeError(
+            "CRITICAL: Cannot write to 'trades' using 'anon' key (violates RLS). "
+            "SUPABASE_SERVICE_ROLE_KEY is required in environment."
+        )
     client = get_supabase()
     allowed_cols = {
         "signal_id", "source", "strike", "option_type", "expiry",
@@ -360,6 +404,11 @@ def update_trade_supabase(trade_id: int, updates: dict) -> bool:
     """
     if not trade_id or not updates:
         return False
+    if _is_anon_jwt(SUPABASE_KEY):
+        raise RuntimeError(
+            "CRITICAL: Cannot update 'trades' using 'anon' key (violates RLS). "
+            "SUPABASE_SERVICE_ROLE_KEY is required in environment."
+        )
     client = get_supabase()
     allowed_cols = {
         "exit_premium", "exit_reason", "net_pnl_pct",
@@ -380,6 +429,11 @@ def insert_strike_daily_stats_supabase(rows: list[dict]) -> int:
     """
     if not rows:
         return 0
+    if _is_anon_jwt(SUPABASE_KEY):
+        raise RuntimeError(
+            "CRITICAL: Cannot write to 'strike_daily_stats' using 'anon' key (violates RLS). "
+            "SUPABASE_SERVICE_ROLE_KEY is required in environment."
+        )
     client = get_supabase()
     allowed_cols = {
         "trade_date", "strike_offset", "option_type",
@@ -457,10 +511,20 @@ def purge_old_data_supabase() -> None:
     """
     Call the Supabase SQL function to purge options_chain and news_raw
     rows older than 7 days. Keeps database under ~90 MB forever.
-    TEMPORARILY PAUSED for signal backfill (capturing entry_premium, mfe, mae).
     """
-    logger.info("Supabase: 7-day retention purge temporarily paused for signal backfill")
-    return
+    client = get_supabase()
+    try:
+        client.rpc("purge_old_data").execute()
+        logger.info("Supabase: 7-day retention purge completed via RPC")
+    except Exception as e:
+        logger.debug("Supabase purge_old_data RPC call: %s, falling back to direct delete", e)
+        try:
+            from datetime import timedelta
+            cutoff = (datetime.now(timezone.utc) - timedelta(days=7)).isoformat()
+            client.table("options_chain").delete().lt("timestamp", cutoff).execute()
+            logger.info("Supabase: direct 7-day retention purge completed for options_chain (cutoff: %s)", cutoff)
+        except Exception as e2:
+            logger.error("Supabase direct purge failed: %s", e2)
 
 
 def count_trading_days_supabase(symbol: str) -> int:

@@ -28,8 +28,8 @@ EXPORT_MINUTE = 31
 # Strike range around ATM (number of strikes each side)
 STRIKE_RANGE = 15
 
-# Expiry: skip contracts with DTE <= this
-MIN_DTE = 2
+# Expiry: min days to expiry (0 = include today's expiry contracts)
+MIN_DTE = 0
 
 # Max expiries to track per symbol
 MAX_EXPIRIES = 2

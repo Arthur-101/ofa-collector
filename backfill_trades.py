@@ -86,9 +86,11 @@ def _rederive_quadrant_bias(sig: dict, client) -> tuple[str, str]:
 
 def _simulate_and_insert_trade(client, sig_id: int, source: str, target_strike: float,
                                target_type: str, sig_exp: str, bias_used: str,
-                               fired_at: str, is_late: bool, dry_run: bool) -> bool:
+                               fired_at: str, is_late: bool, dry_run: bool,
+                               thesis_at: str | None = None) -> bool:
     """Simulate a single trade from historical ticks and insert into trades table."""
     sig_date = fired_at[:10]
+    search_start = (thesis_at if (source == "LLM" and thesis_at) else fired_at)
 
     if bias_used == "NEUTRAL":
         trade_row = {
@@ -110,6 +112,7 @@ def _simulate_and_insert_trade(client, sig_id: int, source: str, target_strike: 
             "resolved_at": fired_at,
             "stale_ltp": False,
             "is_exploratory": True,
+            "thesis_at": thesis_at,
         }
         if not dry_run:
             db_supabase.insert_trade_supabase(trade_row)
@@ -123,7 +126,7 @@ def _simulate_and_insert_trade(client, sig_id: int, source: str, target_strike: 
             .eq("expiry", sig_exp)
             .eq("strike", target_strike)
             .eq("option_type", target_type)
-            .gt("timestamp", fired_at)
+            .gt("timestamp", search_start)
             .lte("timestamp", f"{sig_date}T23:59:59")
             .order("timestamp", desc=False)
             .limit(100)
@@ -135,32 +138,31 @@ def _simulate_and_insert_trade(client, sig_id: int, source: str, target_strike: 
         return False
 
     if not ticks:
-        # If fired after late cutoff, still record as SKIPPED_LATE_ENTRY
-        if is_late:
-            trade_row = {
-                "signal_id": sig_id,
-                "source": source,
-                "strike": target_strike,
-                "option_type": target_type,
-                "expiry": sig_exp,
-                "bias_used": bias_used,
-                "entry_at": fired_at,
-                "entry_premium": 0.0,
-                "exit_premium": 0.0,
-                "exit_reason": "SKIPPED_LATE_ENTRY",
-                "target_pct": TARGET_PCT,
-                "stop_pct": STOP_PCT,
-                "net_pnl_pct": 0.0,
-                "mfe": 0.0,
-                "mae": 0.0,
-                "resolved_at": fired_at,
-                "stale_ltp": False,
-                "is_exploratory": True,
-            }
-            if not dry_run:
-                db_supabase.insert_trade_supabase(trade_row)
-            return True
-        return False
+        exit_rsn = "SKIPPED_LATE_ENTRY" if is_late else "SKIPPED_NO_DATA"
+        trade_row = {
+            "signal_id": sig_id,
+            "source": source,
+            "strike": target_strike,
+            "option_type": target_type,
+            "expiry": sig_exp,
+            "bias_used": bias_used,
+            "entry_at": fired_at,
+            "entry_premium": 0.0,
+            "exit_premium": 0.0,
+            "exit_reason": exit_rsn,
+            "target_pct": TARGET_PCT,
+            "stop_pct": STOP_PCT,
+            "net_pnl_pct": 0.0,
+            "mfe": 0.0,
+            "mae": 0.0,
+            "resolved_at": fired_at,
+            "stale_ltp": False,
+            "is_exploratory": True,
+            "thesis_at": thesis_at,
+        }
+        if not dry_run:
+            db_supabase.insert_trade_supabase(trade_row)
+        return True
 
     entry_tick = ticks[0]
     entry_at = entry_tick["timestamp"]
@@ -208,6 +210,7 @@ def _simulate_and_insert_trade(client, sig_id: int, source: str, target_strike: 
             "resolved_at": entry_at,
             "stale_ltp": stale_ltp,
             "is_exploratory": True,
+            "thesis_at": thesis_at,
         }
         if not dry_run:
             db_supabase.insert_trade_supabase(trade_row)
@@ -233,6 +236,7 @@ def _simulate_and_insert_trade(client, sig_id: int, source: str, target_strike: 
             "resolved_at": entry_at,
             "stale_ltp": stale_ltp,
             "is_exploratory": True,
+            "thesis_at": thesis_at,
         }
         if not dry_run:
             db_supabase.insert_trade_supabase(trade_row)
@@ -295,6 +299,7 @@ def _simulate_and_insert_trade(client, sig_id: int, source: str, target_strike: 
         "resolved_at": resolved_at,
         "stale_ltp": stale_ltp,
         "is_exploratory": True,
+        "thesis_at": thesis_at,
     }
     if not dry_run:
         db_supabase.insert_trade_supabase(trade_row)
@@ -374,7 +379,8 @@ def backfill_all_signals(dry_run: bool = False):
                 bias_used=llm_bias,
                 fired_at=fired_at,
                 is_late=is_late,
-                dry_run=dry_run
+                dry_run=dry_run,
+                thesis_at=sig.get("thesis_at")
             )
             if ok_llm:
                 llm_trades_count += 1

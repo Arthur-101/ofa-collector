@@ -35,6 +35,11 @@ def main():
     logger.info("OFA Collector starting up")
     logger.info("=" * 60)
 
+    # 0. Verify Supabase service role credentials (fail loudly if anon key)
+    logger.info("Step 0: Verifying Supabase service_role credentials...")
+    from db_supabase import verify_credentials
+    verify_credentials()
+
     # 1. Init DB
     logger.info("Step 1: Initialising database...")
     init_db()

@@ -146,6 +146,7 @@ def fill_pending_entries(symbol: str, current_rows: list[dict], now_utc: str) ->
                         "mae": 0.0,
                         "resolved_at": now_utc,
                         "stale_ltp": is_stale,
+                        "is_exploratory": False,
                     })
                     try:
                         client.table("signals").update({
@@ -179,6 +180,7 @@ def fill_pending_entries(symbol: str, current_rows: list[dict], now_utc: str) ->
                         "mae": 0.0,
                         "resolved_at": now_utc,
                         "stale_ltp": is_stale,
+                        "is_exploratory": False,
                     })
                     try:
                         client.table("signals").update({
@@ -206,6 +208,7 @@ def fill_pending_entries(symbol: str, current_rows: list[dict], now_utc: str) ->
                         "target_pct": TARGET_PCT,
                         "stop_pct": STOP_PCT,
                         "stale_ltp": is_stale,
+                        "is_exploratory": False,
                     })
                     try:
                         client.table("signals").update({
@@ -251,6 +254,8 @@ def fill_pending_entries(symbol: str, current_rows: list[dict], now_utc: str) ->
                         "mae": 0.0,
                         "resolved_at": now_utc,
                         "stale_ltp": llm_stale,
+                        "is_exploratory": False,
+                        "thesis_at": sig.get("thesis_at"),
                     })
                 elif llm_entry_ltp > 0:
                     db_supabase.insert_trade_supabase({
@@ -265,6 +270,8 @@ def fill_pending_entries(symbol: str, current_rows: list[dict], now_utc: str) ->
                         "target_pct": TARGET_PCT,
                         "stop_pct": STOP_PCT,
                         "stale_ltp": llm_stale,
+                        "is_exploratory": False,
+                        "thesis_at": sig.get("thesis_at"),
                     })
                     logger.info("🤖 Signal %s [LLM]: Entry filled at ₹%.2f (%s %s %s)",
                                 sig_id, llm_entry_ltp, llm_bias, llm_opt.get("strike"), llm_opt.get("option_type"))
