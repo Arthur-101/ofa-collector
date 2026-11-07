@@ -30,7 +30,7 @@ CLIENT_ID   = os.getenv("ANGEL_CLIENT_ID")
 PASSWORD    = os.getenv("ANGEL_PASSWORD")
 TOTP_SECRET = os.getenv("ANGEL_TOTP_SECRET")
 
-MIN_DTE    = 2     # skip expiries expiring within 2 calendar days
+MIN_DTE    = 0     # include today's expiry (0DTE); expired dates are filtered out
 STRIKE_PCT = 0.10  # keep strikes within ±10% of spot
 NUM_EXPIRIES = 2   # how many active expiries to track
 
@@ -88,57 +88,66 @@ def _load_instruments(symbol: str, spot: float) -> list[dict]:
 
     # Re-download if cache is stale (new trading day)
     if _instruments_cache is None or _instruments_date != today:
+        downloaded = False
+        parsed: list[dict] = []
         logger.info("Downloading instrument master from Angel One …")
         try:
             r    = requests.get(INSTRUMENT_URL, timeout=30)
             r.raise_for_status()
             data = r.json()
             logger.info("Instrument master downloaded: %d instruments", len(data))
+            downloaded = True
+
+            # Parse and store all NIFTY/BANKNIFTY options
+            for item in data:
+                if item.get("exch_seg") != "NFO":
+                    continue
+                if item.get("instrumenttype") != "OPTIDX":
+                    continue
+                name = item.get("name", "")
+                if name not in ("NIFTY", "BANKNIFTY"):
+                    continue
+                sym = item.get("symbol", "")
+                m   = SYMBOL_RE.match(sym)
+                if not m:
+                    continue
+                expiry_date = date(
+                    2000 + int(m.group("yy")),
+                    int(MONTH_MAP[m.group("mon")]),
+                    int(m.group("dd"))
+                )
+                parsed.append({
+                    "token":       item["token"],
+                    "symbol":      sym,
+                    "name":        name,
+                    "expiry":      expiry_date.isoformat(),
+                    "expiry_date": expiry_date,
+                    "strike":      float(item["strike"]) / 100,
+                    "option_type": m.group("otype"),
+                })
         except Exception as e:
             logger.warning("Download failed, falling back to local cache: %s", e)
-            if os.path.exists(INSTRUMENT_CACHE):
-                with open(INSTRUMENT_CACHE) as f:
-                    return json.load(f)
-            raise RuntimeError("No instrument cache available") from e
-
-        # Parse and store all NIFTY/BANKNIFTY options
-        parsed = []
-        for item in data:
-            if item.get("exch_seg") != "NFO":
-                continue
-            if item.get("instrumenttype") != "OPTIDX":
-                continue
-            name = item.get("name", "")
-            if name not in ("NIFTY", "BANKNIFTY"):
-                continue
-            sym = item.get("symbol", "")
-            m   = SYMBOL_RE.match(sym)
-            if not m:
-                continue
-            expiry_date = date(
-                2000 + int(m.group("yy")),
-                int(MONTH_MAP[m.group("mon")]),
-                int(m.group("dd"))
-            )
-            parsed.append({
-                "token":       item["token"],
-                "symbol":      sym,
-                "name":        name,
-                "expiry":      expiry_date.isoformat(),
-                "expiry_date": expiry_date,
-                "strike":      float(item["strike"]) / 100,
-                "option_type": m.group("otype"),
-            })
+            if not os.path.exists(INSTRUMENT_CACHE):
+                raise RuntimeError("No instrument cache available") from e
+            with open(INSTRUMENT_CACHE) as f:
+                cached = json.load(f)
+            for p in cached:
+                try:
+                    exp = date.fromisoformat(p["expiry"])
+                except Exception:
+                    continue
+                parsed.append({**p, "expiry_date": exp})
 
         _instruments_cache = parsed
         _instruments_date  = today
 
-        # Write local cache for offline fallback
-        with open(INSTRUMENT_CACHE, "w") as f:
-            json.dump(
-                [{k: v for k, v in p.items() if k != "expiry_date"} for p in parsed],
-                f, indent=2
-            )
+        # Write local cache for offline fallback (only when freshly downloaded)
+        if downloaded:
+            with open(INSTRUMENT_CACHE, "w") as f:
+                json.dump(
+                    [{k: v for k, v in p.items() if k != "expiry_date"} for p in parsed],
+                    f, indent=2
+                )
 
     # Filter to requested symbol, active expiries, ATM strikes
     min_dte = today + timedelta(days=MIN_DTE)

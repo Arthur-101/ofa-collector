@@ -26,11 +26,14 @@ def health():
     the 7-day inactivity auto-pause on the free tier.
     """
     sb_alive = supabase_heartbeat()
+    tick_age = ws_feed.last_tick_age_seconds()
     return {
         "status": "ok",
         "time_utc": datetime.now(timezone.utc).isoformat(),
         "ws_connected": ws_feed.is_connected(),
         "tick_count": ws_feed.tick_count(),
+        "last_tick_age_sec": tick_age,
+        "feed_stale": (tick_age is None or tick_age > ws_feed.MAX_TICK_AGE_SECONDS),
         "supabase_alive": sb_alive,
     }
 
@@ -38,11 +41,14 @@ def health():
 @app.get("/status")
 def status():
     """Returns DB row count (local + Supabase) and feed state."""
+    tick_age = ws_feed.last_tick_age_seconds()
     return {
         "db_rows_local": get_row_count(),
         "db_rows_supabase": get_row_count_supabase(),
         "ws_connected": ws_feed.is_connected(),
         "tick_count": ws_feed.tick_count(),
+        "last_tick_age_sec": tick_age,
+        "feed_stale": (tick_age is None or tick_age > ws_feed.MAX_TICK_AGE_SECONDS),
         "time_utc": datetime.now(timezone.utc).isoformat(),
     }
 

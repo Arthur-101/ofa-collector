@@ -41,12 +41,14 @@ def _poll_job():
         logger.debug("poll_job skipped: today is %s", reason)
         return
 
-    from ws_feed import flush_to_db
+    from ws_feed import flush_to_db, refresh_feed
     from cloud_pipeline import run_cloud_analysis
+    wrote_any = False
     for sym in SYMBOLS:
         try:
             rows = flush_to_db(sym)
             if rows:
+                wrote_any = True
                 logger.info("poll_job: %d rows flushed for %s", len(rows), sym)
                 try:
                     run_cloud_analysis(sym, rows)
@@ -54,6 +56,29 @@ def _poll_job():
                     logger.error("run_cloud_analysis failed for %s: %s", sym, e)
         except Exception as e:
             logger.error("poll_job error for %s: %s", sym, e)
+
+    # A trading-day flush with no fresh rows means the subscription is broken
+    # (rollover, expired token, dead socket). refresh_feed has a 10-min cooldown.
+    if not wrote_any:
+        logger.warning("poll_job: no fresh rows this cycle — checking feed subscription")
+        try:
+            refresh_feed(SYMBOLS)
+        except Exception as e:
+            logger.error("poll_job refresh_feed failed: %s", e)
+
+
+def _preopen_refresh_job():
+    from holidays import is_market_holiday
+    is_hol, reason = is_market_holiday()
+    if is_hol:
+        logger.info("preopen_refresh_job skipped: today is %s", reason)
+        return
+    from ws_feed import refresh_feed
+    logger.info("⏰ preopen_refresh_job fired — reloading instruments and resubscribing")
+    try:
+        refresh_feed(SYMBOLS, force=True)
+    except Exception as e:
+        logger.error("preopen_refresh_job error: %s", e)
 
 
 def _export_job():
@@ -108,6 +133,18 @@ def start_scheduler() -> BackgroundScheduler:
         minute=RESET_MINUTE,
         id="reset_job",
         name="Daily DB reset",
+        misfire_grace_time=120,
+    )
+
+    # 9:10 AM IST — reload instruments + resubscribe before the open
+    _scheduler.add_job(
+        _preopen_refresh_job,
+        trigger="cron",
+        day_of_week="mon-fri",
+        hour=9,
+        minute=10,
+        id="preopen_refresh_job",
+        name="Pre-open feed refresh",
         misfire_grace_time=120,
     )
 

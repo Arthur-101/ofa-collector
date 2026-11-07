@@ -21,7 +21,12 @@ from SmartApi import SmartConnect
 from SmartApi.smartWebSocketV2 import SmartWebSocketV2
 
 from db import get_latest_oi_snapshot, insert_options_rows
-from db_supabase import insert_options_rows_supabase, get_latest_oi_snapshot_supabase, get_latest_snapshot_supabase
+from db_supabase import (
+    insert_options_rows_supabase,
+    get_latest_oi_snapshot_supabase,
+    get_latest_snapshot_supabase,
+    get_latest_snapshot_with_ts_supabase,
+)
 from angel_fetcher import fetch_and_store as _angel_fetch_and_store
 
 # Import internal helpers directly by loading the module
@@ -48,6 +53,12 @@ _sws: SmartWebSocketV2 | None = None
 _ws_thread: threading.Thread | None = None
 _connected = False
 
+# ── Freshness / refresh guards ────────────────────────────────────────────────
+MAX_TICK_AGE_SECONDS = 180      # ignore ticks older than 3 minutes
+REFRESH_COOLDOWN_SECONDS = 600  # don't reload instruments more than once per 10 min
+_last_refresh = 0.0
+_refresh_lock = threading.Lock()
+
 
 # ── Start the WebSocket feed ──────────────────────────────────────────────────
 
@@ -57,7 +68,11 @@ def start_feed(symbols: list[str]) -> None:
     Runs the WebSocket in a background daemon thread.
     Call once at startup.
     """
-    global _sws, _ws_thread, _token_map, _connected
+    global _sws, _ws_thread, _token_map, _connected, _last_refresh
+
+    if _ws_thread is not None and _ws_thread.is_alive() and _connected:
+        logger.warning("start_feed: feed already connected — skipping restart")
+        return
 
     # Login
     client = _af._login()
@@ -80,6 +95,7 @@ def start_feed(symbols: list[str]) -> None:
 
     # Build token map
     _token_map = {s["token"]: s for s in all_scrips}
+    _last_refresh = time.time()
     logger.info("Total tokens to subscribe: %d", len(_token_map))
 
     # Build subscription token list (NFO = exchangeType 2)
@@ -174,6 +190,70 @@ def _on_close(wsapp, close_status_code=None, close_msg=None) -> None:
             logger.error("Reconnect failed: %s", e)
     threading.Thread(target=_reconnect, daemon=True, name="ws-reconnect").start()
 
+
+# ── Instrument refresh / resubscribe ─────────────────────────────────────────
+
+def refresh_feed(symbols: list[str], force: bool = False) -> bool:
+    """
+    Reload the instrument master and resubscribe the live socket.
+    Runs pre-open, on expiry rollover, and when a trading-day flush is empty.
+    Cooldown prevents refresh storms. Returns True when the subscription changed.
+    """
+    global _token_map, _last_refresh
+
+    now = time.time()
+    with _refresh_lock:
+        if not force and (now - _last_refresh) < REFRESH_COOLDOWN_SECONDS:
+            logger.info("refresh_feed: cooldown active (%.0fs remaining)",
+                        REFRESH_COOLDOWN_SECONDS - (now - _last_refresh))
+            return False
+
+        client = _af._get_client()
+        new_map: dict[str, dict] = {}
+        for sym in symbols:
+            spot = _af._get_spot(client, sym)
+            if not spot:
+                logger.warning("refresh_feed: no spot for %s", sym)
+                continue
+            for s in _af._load_instruments(sym, spot):
+                new_map[s["token"]] = s
+
+        if not new_map:
+            logger.error("refresh_feed: no scrips loaded — keeping existing subscription")
+            return False
+
+        old_tokens = list(_token_map.keys())
+        new_tokens = list(new_map.keys())
+        _token_map = new_map
+        _last_refresh = now
+
+        if _sws is not None and _connected:
+            try:
+                if old_tokens:
+                    _sws.unsubscribe(
+                        correlation_id="ofa00002",
+                        mode=SmartWebSocketV2.SNAP_QUOTE,
+                        token_list=[{"exchangeType": 2, "tokens": old_tokens}],
+                    )
+                _sws.subscribe(
+                    correlation_id="ofa00002",
+                    mode=SmartWebSocketV2.SNAP_QUOTE,
+                    token_list=[{"exchangeType": 2, "tokens": new_tokens}],
+                )
+                logger.info("refresh_feed: resubscribed %d tokens", len(new_tokens))
+                return True
+            except Exception as e:
+                logger.error("refresh_feed: resubscribe failed (%s) — restarting feed", e)
+
+        logger.warning("refresh_feed: socket down — restarting feed")
+        try:
+            start_feed(symbols)
+        except Exception as e:
+            logger.error("refresh_feed: restart failed: %s", e)
+            return False
+        return True
+
+
 # ── 5-min flush to SQLite ─────────────────────────────────────────────────────
 
 def flush_to_db(symbol: str) -> list[dict]:
@@ -195,8 +275,22 @@ def flush_to_db(symbol: str) -> list[dict]:
         logger.warning("flush_to_db: tick store is empty — WebSocket may not have data yet")
         return []
 
+    # Freshness guard: never persist a frozen quote as if it were live.
+    now_dt = datetime.now(timezone.utc)
+    stale_cutoff = now_dt - timedelta(seconds=MAX_TICK_AGE_SECONDS)
+    fresh = {
+        tok: tick for tok, tick in snapshot.items()
+        if _parse_tick_ts(tick.get("ts")) and _parse_tick_ts(tick.get("ts")) >= stale_cutoff
+    }
+    if not fresh:
+        logger.warning("flush_to_db: all ticks older than %ds — skipping flush", MAX_TICK_AGE_SECONDS)
+        return []
+    if len(fresh) < len(snapshot):
+        logger.warning("flush_to_db: dropped %d stale ticks (older than %ds)",
+                       len(snapshot) - len(fresh), MAX_TICK_AGE_SECONDS)
+
     # Dynamic safeguard: If total volume across all scrips is 0, market is closed / holiday
-    total_volume = sum(int(t.get("volume") or 0) for t in snapshot.values())
+    total_volume = sum(int(t.get("volume") or 0) for t in fresh.values())
     if total_volume == 0:
         logger.info("flush_to_db: total volume across all strikes is 0 (market closed/holiday). Skipping flush.")
         return []
@@ -213,17 +307,24 @@ def flush_to_db(symbol: str) -> list[dict]:
         logger.error("Could not fetch spot price: %s", e)
         spot = None
 
-    timestamp = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
-    # Try Supabase first for snapshot baseline, fall back to local SQLite
-    prev_snapshot = get_latest_snapshot_supabase(symbol)
-    if not prev_snapshot:
-        prev_snapshot = get_latest_oi_snapshot(symbol)
+    today_str = now_dt.date().isoformat()
+    timestamp = now_dt.strftime("%Y-%m-%d %H:%M:%S")
+
+    # Deltas are only meaningful against a same-day prior snapshot.
+    # Cross-day OI/volume resets would otherwise look like a huge anomaly.
+    prev_snapshot, prev_ts = get_latest_snapshot_with_ts_supabase(symbol)
+    if not prev_snapshot or (prev_ts or "")[:10] != today_str:
+        prev_snapshot = {}
 
     rows = []
+    expired_skipped = 0
 
-    for token, tick in snapshot.items():
+    for token, tick in fresh.items():
         scrip = _token_map.get(token)
         if not scrip or scrip.get("name") != symbol:
+            continue
+        if scrip["expiry"] < today_str:
+            expired_skipped += 1
             continue
 
         oi     = tick.get("oi")     or 0
@@ -268,6 +369,9 @@ def flush_to_db(symbol: str) -> list[dict]:
             "price_change_pct": price_change_pct,
             "spot_price":       spot,
         })
+
+    if expired_skipped:
+        logger.info("flush_to_db: skipped %d expired scrips", expired_skipped)
 
     if rows:
         # Write to local SQLite (backup)
@@ -352,8 +456,27 @@ def _norm_pdf(x: float) -> float:
 
 # ── Feed health check ─────────────────────────────────────────────────────────
 
+def _parse_tick_ts(ts: str | None) -> datetime | None:
+    if not ts:
+        return None
+    try:
+        dt = datetime.fromisoformat(ts.replace("Z", "+00:00"))
+        return dt if dt.tzinfo else dt.replace(tzinfo=timezone.utc)
+    except Exception:
+        return None
+
+
 def is_connected() -> bool:
     return _connected
 
 def tick_count() -> int:
     return len(_tick_store)
+
+def last_tick_age_seconds() -> float | None:
+    """Age of the newest tick in the store, in seconds. None when empty."""
+    with _tick_lock:
+        stamps = [_parse_tick_ts(t.get("ts")) for t in _tick_store.values()]
+    stamps = [s for s in stamps if s is not None]
+    if not stamps:
+        return None
+    return round((datetime.now(timezone.utc) - max(stamps)).total_seconds(), 1)

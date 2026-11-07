@@ -283,10 +283,10 @@ def get_intraday_oi_changes_supabase(symbol: str, date_str: str) -> list[dict]:
 
 
 
-def get_latest_snapshot_supabase(symbol: str) -> dict[tuple, dict]:
+def get_latest_snapshot_with_ts_supabase(symbol: str) -> tuple[dict[tuple, dict], str | None]:
     """
-    Returns {(strike, option_type, expiry): {"oi": oi, "last_price": last_price, "volume": volume}}
-    for the most recent timestamp in Supabase for the given symbol.
+    Returns (snapshot, timestamp) for the most recent options_chain snapshot.
+    snapshot = {(strike, option_type, expiry): {"oi", "last_price", "volume"}}
     """
     client = get_supabase()
     try:
@@ -299,7 +299,7 @@ def get_latest_snapshot_supabase(symbol: str) -> dict[tuple, dict]:
             .execute()
         )
         if not latest_res.data:
-            return {}
+            return {}, None
 
         latest_ts = latest_res.data[0]["timestamp"]
         res = (
@@ -309,7 +309,7 @@ def get_latest_snapshot_supabase(symbol: str) -> dict[tuple, dict]:
             .eq("timestamp", latest_ts)
             .execute()
         )
-        return {
+        snapshot = {
             (float(r["strike"]), r["option_type"], r["expiry"]): {
                 "oi": r.get("oi"),
                 "last_price": r.get("last_price"),
@@ -317,9 +317,19 @@ def get_latest_snapshot_supabase(symbol: str) -> dict[tuple, dict]:
             }
             for r in (res.data or [])
         }
+        return snapshot, latest_ts
     except Exception as e:
-        logger.error("Supabase get_latest_snapshot failed: %s", e)
-        return {}
+        logger.error("Supabase get_latest_snapshot_with_ts failed: %s", e)
+        return {}, None
+
+
+def get_latest_snapshot_supabase(symbol: str) -> dict[tuple, dict]:
+    """
+    Returns {(strike, option_type, expiry): {"oi": oi, "last_price": last_price, "volume": volume}}
+    for the most recent timestamp in Supabase for the given symbol.
+    """
+    snapshot, _ = get_latest_snapshot_with_ts_supabase(symbol)
+    return snapshot
 
 
 def get_latest_oi_snapshot_supabase(symbol: str) -> dict[tuple, int]:
