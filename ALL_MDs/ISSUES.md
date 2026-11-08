@@ -53,6 +53,7 @@
 - **Symptom:** A single detection run fired up to 26 signals at the same timestamp (14 Oct 09:25, 21 Oct 15:35 IST); 31 of 148 flushes emitted 5 or more.
 - **Cause:** No cap — every strike that cleared its threshold was inserted.
 - **Fix (in code):** `_cap_per_flush` keeps the top `MAX_SIGNALS_PER_RUN` (8) by `signal_strength`. `test_flush_cap.py` asserts the cap, the ordering and that smaller flushes pass through untouched.
+- **Known limitation:** `signal_strength` is a percentile of raw magnitude (ΔOI / IV), not of expected return, so the cap systematically keeps the biggest anomalies — which may also be the noisiest. Reviewed with Gemini 2026-11-08: keep the cap for execution sanity, but do not treat the kept 8 as the best 8 by edge until strength is validated against outcomes.
 
 ### 11. BEARISH signals underperform (open — no fix)
 - **Symptom:** On the 155 deduped clean trades, `BEARISH`/PE is 23/60 (38.3%) against `BULLISH`/CE 59/95 (62.1%).

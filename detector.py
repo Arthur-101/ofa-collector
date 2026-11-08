@@ -31,6 +31,9 @@ FULL_IV_MULTIPLIER     = 1.5   # iv > 1.5x session average
 
 # One detection run fires at one timestamp; without a cap a single flush can
 # emit 20+ strikes at once and drown the feed.
+# shortcut: ranks by signal_strength, a percentile of raw magnitude, not by
+# expected return — so the cap prefers the biggest anomalies. Revisit once the
+# strength metric has been tested against outcomes.
 MAX_SIGNALS_PER_RUN     = 8
 
 DEEP_ITM_PCT            = 0.10  # >10% away from spot = deep ITM
