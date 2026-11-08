@@ -48,7 +48,6 @@ Your role is to interpret unusual options flow signals and generate concise, act
 You understand:
 - OI_BUILDUP means new positions are being opened (directional intent)
 - OI_UNWIND means positions are being closed (potential reversal or target achieved)
-- VOLUME_SPIKE with flat OI means intraday speculation (less conviction)
 - IV_SPIKE means elevated premium payment, often before an expected move
 - PCR > 1.2 indicates defensive/bearish market positioning
 - PCR < 0.8 indicates aggressive/bullish positioning

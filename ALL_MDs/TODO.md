@@ -4,7 +4,7 @@
 
 ## P0 — data integrity
 
-- [ ] **Deploy the feed freshness/rollover fix.** `MIN_DTE=0`, pre-open resubscribe, empty-flush refresh, 3-minute tick age guard, expired-expiry skip, same-day `oi_change`. Code done; verify on Render with a live session.
+- [x] **Deploy the feed freshness/rollover fix.** Done 2026-11-07: pushed `4d0d266`, manually deployed on Render (service `srv-darjc617lnhs73dkoku0`, `Deploy succeeded|Live`, 1m 35s). Live `/health` returns the new fields (`last_tick_age_sec`, `feed_stale`), WS connected with 388 scrips. Still needs one live trading session to confirm ticks are fresh during market hours.
 - [ ] **Verify the resolver skip paths.** Confirm `SKIPPED_STALE_LTP`, `SKIPPED_NO_DATA`, `SKIPPED_MONEYNESS`, `SKIPPED_STALE_SIGNAL` appear instead of flat −0.50% time exits.
 - [ ] **Re-enable retention purge.** Paused on 2026-10-12 for backfill (`d545978`). Storage grows every session. Define a cutoff, verify backfill is complete, then restore the purge.
 - [ ] **Grow the clean trade sample.** Re-run the backtest after the feed fix; confirm the resolver processes every eligible signal and that stale/ITM entries are excluded.

@@ -44,6 +44,26 @@
 - **Cause:** By design — collector SQLite is a temp buffer, Supabase is the record.
 - **Fix:** Document clearly; do not treat collector SQLite as history.
 
+### 9. VOLUME_SPIKE could never be scored (fixed)
+- **Symptom:** 181 of 574 signals since 14 Oct were `VOLUME_SPIKE`, all excluded as `NON_DIRECTIONAL`. Zero measurable trades from a third of the feed.
+- **Cause:** `_detect_volume_spike` hardcoded `bias="NEUTRAL"` — "high volume, flat OI" has no direction, so the resolver always excluded it. It was noise by construction, not by performance.
+- **Fix (in code):** detector and its call removed 2026-11-08; the unused `BOOTSTRAP_VOLUME_PERCENTILE` / `FULL_VOLUME_ZSCORE` constants and the `llm_engine` prompt line went with it. Historical rows keep the label so the frontend filter still matches them. Covered by `test_flush_cap.py`.
+
+### 10. One flush could emit 26 signals (fixed)
+- **Symptom:** A single detection run fired up to 26 signals at the same timestamp (14 Oct 09:25, 21 Oct 15:35 IST); 31 of 148 flushes emitted 5 or more.
+- **Cause:** No cap — every strike that cleared its threshold was inserted.
+- **Fix (in code):** `_cap_per_flush` keeps the top `MAX_SIGNALS_PER_RUN` (8) by `signal_strength`. `test_flush_cap.py` asserts the cap, the ordering and that smaller flushes pass through untouched.
+
+### 11. BEARISH signals underperform (open — no fix)
+- **Symptom:** On the 155 deduped clean trades, `BEARISH`/PE is 23/60 (38.3%) against `BULLISH`/CE 59/95 (62.1%).
+- **Cause:** Unknown. The sample is two sessions (14–15 Oct) in one direction of the market, so this is equally consistent with a two-day up-move as with a real bias edge.
+- **Decision:** **do not** add a regime filter. Filtering on 60 trades from one market move is curve fitting; it would have looked good in hindsight and taught us nothing. Re-check when there are clean trades across both directions.
+
+### 12. IV_SPIKE is unmeasurable so far (open)
+- **Symptom:** Only 3 of 72 `IV_SPIKE` signals produced a clean trade (1 win).
+- **Cause:** 69 of its 82 trades fell in the 16 Oct–2 Nov frozen-feed window and were excluded as `stale_ltp`. That is the outage, not necessarily the rule.
+- **Decision:** leave the rule alone until it has fired on a live session. Do not retire a rule on n=3.
+
 ## Resolved
 
 ### Anon key silently used

@@ -3,8 +3,10 @@
 # Real-world signal logic:
 #   OI_BUILDUP  : oi_change > 0 + volume confirms → new positions being built
 #   OI_UNWIND   : oi_change < 0 + volume confirms → positions being closed
-#   VOLUME_SPIKE: high volume but flat OI → intraday speculation / day traders
 #   IV_SPIKE    : IV significantly above session average → someone paying premium
+#
+# VOLUME_SPIKE was retired 2026-11-08: it was hardcoded NEUTRAL, so every one of
+# its trades resolved NON_DIRECTIONAL and none could ever be scored.
 #
 # Modes:
 #   BOOTSTRAP (<20 trading days): intraday percentile rank thresholds
@@ -22,12 +24,14 @@ logger = logging.getLogger(__name__)
 
 # ── Thresholds ─────────────────────────────────────────────────────────────────
 BOOTSTRAP_OI_PERCENTILE     = 90    # top 10% of today's oi_change values
-BOOTSTRAP_VOLUME_PERCENTILE = 95    # top 5% of today's volume values
 BOOTSTRAP_IV_PERCENTILE     = 90    # top 10% of today's IV values
 
 FULL_OI_MULTIPLIER     = 2.0   # oi_change > 2x average
-FULL_VOLUME_ZSCORE     = 3.0   # volume > mean + 3σ
 FULL_IV_MULTIPLIER     = 1.5   # iv > 1.5x session average
+
+# One detection run fires at one timestamp; without a cap a single flush can
+# emit 20+ strikes at once and drown the feed.
+MAX_SIGNALS_PER_RUN     = 8
 
 DEEP_ITM_PCT            = 0.10  # >10% away from spot = deep ITM
 MIN_DTE                 = 0     # 0 = analyze today's expiry contracts
@@ -216,42 +220,6 @@ def _detect_oi_flow(rows, symbol, spot, today, now_utc, mode, intraday_rows, pri
     return signals
 
 
-def _detect_volume_spike(rows, symbol, spot, today, now_utc, mode, intraday_rows):
-    signals = []
-    all_volumes = [
-        r["volume"] for r in intraday_rows
-        if r.get("volume") is not None and r["volume"] > 0
-    ]
-    if len(all_volumes) < 5:
-        all_volumes = [
-            r["volume"] for r in rows
-            if r.get("volume") is not None and r["volume"] > 0
-        ]
-        if len(all_volumes) < 5:
-            return []
-
-    threshold = float(np.percentile(all_volumes, BOOTSTRAP_VOLUME_PERCENTILE))
-
-    for r in rows:
-        volume = r.get("volume") or 0
-        oi_change = r.get("oi_change") or 0
-
-        if volume < MIN_VOLUME:
-            continue
-
-        # If OI change is large, it's an OI_BUILDUP, not a pure volume spike
-        if abs(oi_change) > volume * 0.3:
-            continue
-
-        if volume < threshold:
-            continue
-
-        strength = _percentile_strength(volume, all_volumes)
-        signals.append(_build_signal(now_utc, symbol, r, "VOLUME_SPIKE", strength, "NEUTRAL", mode))
-
-    return signals
-
-
 def _detect_iv_spike(rows, symbol, spot, today, now_utc, intraday_rows):
     signals = []
     iv_rows = [r for r in rows if r.get("iv") is not None and r["iv"] > 0]
@@ -311,6 +279,12 @@ def _remove_offsetting_signals(signals: list[dict]) -> list[dict]:
     return [s for s in signals if not (s["signal_type"] == "OI_BUILDUP" and (s["strike"], s["expiry"]) in offsetting_keys)]
 
 
+def _cap_per_flush(candidates: list[dict]) -> list[dict]:
+    """Keep only the strongest anomalies from one detection run."""
+    candidates.sort(key=lambda s: s.get("signal_strength") or 0, reverse=True)
+    return candidates[:MAX_SIGNALS_PER_RUN]
+
+
 # ── Main Entry Point ───────────────────────────────────────────────────────────
 
 def run_detection(symbol: str, current_rows: list[dict] | None = None,
@@ -360,11 +334,13 @@ def run_detection(symbol: str, current_rows: list[dict] | None = None,
     # Detect anomalies
     candidates = []
     candidates += _detect_oi_flow(filtered, symbol, spot, today, now_utc, mode, intraday_rows, prior_snapshot_map)
-    candidates += _detect_volume_spike(filtered, symbol, spot, today, now_utc, mode, intraday_rows)
     candidates += _detect_iv_spike(filtered, symbol, spot, today, now_utc, intraday_rows)
 
     # Filter offsetting spreads
     candidates = _remove_offsetting_signals(candidates)
+
+    # Keep only the strongest anomalies from this flush.
+    candidates = _cap_per_flush(candidates)
 
     inserted_signals = []
     for sig in candidates:
