@@ -50,15 +50,19 @@ MONTH_MAP = {
 
 # ── Session ───────────────────────────────────────────────────────────────────
 _client: SmartConnect | None = None
+_client_date: date | None = None
 
 def _get_client() -> SmartConnect:
     global _client
-    if _client is None:
+    # Angel One invalidates sessions daily. Without this check a process that
+    # survives the night keeps using yesterday's dead token: ltpData fails,
+    # no spot price comes back, no scrips load and the feed goes silent all day.
+    if _client is None or _client_date != date.today():
         _client = _login()
     return _client
 
 def _login() -> SmartConnect:
-    global _client
+    global _client, _client_date
     logger.info("Logging in to Angel One …")
     totp = pyotp.TOTP(TOTP_SECRET).now()
     obj  = SmartConnect(api_key=API_KEY)
@@ -66,12 +70,14 @@ def _login() -> SmartConnect:
     if resp.get("status") is False:
         raise RuntimeError(f"Login failed: {resp.get('message')}")
     _client = obj
+    _client_date = date.today()
     logger.info("Angel One login successful.")
     return obj
 
 def _reset_client() -> None:
-    global _client
+    global _client, _client_date
     _client = None
+    _client_date = None
 
 # ── Instrument master ─────────────────────────────────────────────────────────
 _instruments_cache: list[dict] | None = None

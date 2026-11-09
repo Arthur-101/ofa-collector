@@ -208,15 +208,25 @@ def refresh_feed(symbols: list[str], force: bool = False) -> bool:
                         REFRESH_COOLDOWN_SECONDS - (now - _last_refresh))
             return False
 
-        client = _af._get_client()
-        new_map: dict[str, dict] = {}
-        for sym in symbols:
-            spot = _af._get_spot(client, sym)
-            if not spot:
-                logger.warning("refresh_feed: no spot for %s", sym)
-                continue
-            for s in _af._load_instruments(sym, spot):
-                new_map[s["token"]] = s
+        def _build_map() -> dict:
+            client = _af._get_client()
+            m: dict[str, dict] = {}
+            for sym in symbols:
+                spot = _af._get_spot(client, sym)
+                if not spot:
+                    logger.warning("refresh_feed: no spot for %s", sym)
+                    continue
+                for s in _af._load_instruments(sym, spot):
+                    m[s["token"]] = s
+            return m
+
+        new_map = _build_map()
+        if not new_map:
+            # A dead Angel session looks exactly like this: no spot, no scrips.
+            # One fresh login is worth a full trading day of data.
+            logger.warning("refresh_feed: no scrips loaded — retrying with a fresh session")
+            _af._reset_client()
+            new_map = _build_map()
 
         if not new_map:
             logger.error("refresh_feed: no scrips loaded — keeping existing subscription")

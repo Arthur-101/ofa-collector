@@ -65,6 +65,16 @@
 - **Cause:** 69 of its 82 trades fell in the 16 Oct–2 Nov frozen-feed window and were excluded as `stale_ltp`. That is the outage, not necessarily the rule.
 - **Decision:** leave the rule alone until it has fired on a live session. Do not retire a rule on n=3.
 
+### 13. Collector reused yesterday's Angel One session — a full trading day lost (P0, fixed)
+- **Symptom:** Monday 2026-11-09 was a normal trading day (checked against the NSE calendar) and produced **zero** rows: `options_chain` and `market_context` still ended at 2026-11-06T10:25, `signals` at 2026-11-02. `/health` reported `ws_connected=false`, `tick_count=392` frozen at Sunday 15:26 UTC, `last_tick_age_sec` ~96,000.
+- **Cause:** `_get_client()` cached the SmartConnect object for the life of the process and **`_reset_client()` had no callers anywhere**. Angel One invalidates sessions daily, so once the process survived the night every `ltpData` call failed → `_get_spot()` returned None → empty scrip map → `refresh_feed` logged `no scrips loaded — keeping existing subscription` and returned. The 09:10 pre-open refresh and every 5-minute retry failed the same way, so the socket was never resubscribed.
+- **Fix (in code):** `_get_client()` re-logs in when the calendar date changes; `_login()` records the date and `_reset_client()` clears both. `refresh_feed()` now retries once with a fresh session when the map comes back empty, instead of giving up for the cycle. Covered by `test_session_refresh.py`.
+
+### 14. Muhurat session treated as a holiday (open, minor)
+- **Symptom:** NSE held a special Muhurat session on Sunday 2026-11-08 (14:20–15:30 IST) and it was skipped.
+- **Cause:** `holidays.py` lists `2026-11-08` as "Diwali Laxmi Pujan", which is correct for the normal session but the exchange still trades one hour that evening.
+- **Fix:** not worth special-casing a date that occurs once a year; note it if intraday coverage ever matters for a Diwali sample.
+
 ## Resolved
 
 ### Anon key silently used
