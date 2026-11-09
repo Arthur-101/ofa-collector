@@ -6,7 +6,8 @@
 #   GET /status          → row count + WebSocket connection state
 
 import logging
-from datetime import datetime, timezone
+from datetime import datetime, time, timezone
+import pytz
 from fastapi import FastAPI, Query
 from fastapi.responses import JSONResponse
 from db import get_rows_for_date, get_row_count
@@ -14,28 +15,57 @@ from db_supabase import heartbeat as supabase_heartbeat, get_row_count_supabase
 import ws_feed
 
 logger = logging.getLogger(__name__)
+IST = pytz.timezone("Asia/Kolkata")
 
 app = FastAPI(title="OFA Collector API", version="2.0.0")
+
+
+def _market_open_now() -> bool:
+    """Mon–Fri 09:20–15:35 IST on a trading day.
+
+    09:20, not the 09:15 open: the pre-open refresh fires at 09:10 and the
+    socket needs a moment to subscribe, so a stale feed just before then is
+    normal and must not raise an alarm.
+    """
+    from holidays import is_market_holiday
+
+    now = datetime.now(IST)
+    if not (time(9, 20) <= now.time() <= time(15, 35)):
+        return False
+    return not is_market_holiday()[0]
 
 
 @app.get("/health")
 def health():
     """
-    Liveness check — confirms the service is alive.
-    Also performs a Supabase heartbeat query to prevent
-    the 7-day inactivity auto-pause on the free tier.
+    Liveness check, and the only thing watching whether data is flowing.
+
+    The status code matters: the keep-alive cron reads it. On 2026-11-09 the
+    Angel One session was dead and zero rows were collected all day, yet every
+    ping returned 200 OK because feed_stale was only a body field. A dead feed
+    during market hours must fail the check.
     """
     sb_alive = supabase_heartbeat()
     tick_age = ws_feed.last_tick_age_seconds()
-    return {
-        "status": "ok",
+    stale = tick_age is None or tick_age > ws_feed.MAX_TICK_AGE_SECONDS
+
+    if stale and _market_open_now():
+        status, code = "feed_stale", 503
+    elif not sb_alive:
+        status, code = "supabase_down", 503
+    else:
+        status, code = "ok", 200
+
+    return JSONResponse(status_code=code, content={
+        "status": status,
         "time_utc": datetime.now(timezone.utc).isoformat(),
         "ws_connected": ws_feed.is_connected(),
         "tick_count": ws_feed.tick_count(),
         "last_tick_age_sec": tick_age,
-        "feed_stale": (tick_age is None or tick_age > ws_feed.MAX_TICK_AGE_SECONDS),
+        "feed_stale": stale,
+        "market_open": _market_open_now(),
         "supabase_alive": sb_alive,
-    }
+    })
 
 
 @app.get("/status")

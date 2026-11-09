@@ -29,10 +29,11 @@
 - **Cause:** Detector previously defaulted entry premium.
 - **Fix:** `entry_premium` initialised to `None` (commit `9d668c3`); resolution now strict t+1. Audit remaining nulls.
 
-### 6. No alerting
+### 6. No alerting (fixed — keep-alive was already there, the status code was not)
 - **Symptom:** A dead WebSocket or failed 5-minute cycle is invisible until someone checks.
-- **Cause:** Only `/health` and logs exist.
-- **Fix:** Add external uptime check on `/health` (now exposes `last_tick_age_sec` / `feed_stale`) and a failure notifier for `run_cloud_analysis` exceptions.
+- **Cause:** `/health` returned `200 OK` and `"status": "ok"` unconditionally; `feed_stale` was only a body field. The keep-alive cron (`OFA Collector Keepalive`, cron-job.org, every 10 min on `/health`) was therefore green all through 2026-11-09 while the feed collected **zero rows for the whole session**. It kept the service awake but could not report that it was broken.
+- **Fix (in code):** `/health` now returns **503** with `status: "feed_stale"` when ticks are older than `MAX_TICK_AGE_SECONDS` (180s) **and** the market is open, or **503** `status: "supabase_down"` when the Supabase heartbeat fails. `_market_open_now()` gates on Mon–Fri **09:20–15:35 IST** (09:20 not 09:15 — the pre-open refresh fires at 09:10 and the socket needs a moment) and skips weekends and `NSE_HOLIDAYS`, so a stale feed after hours or on a holiday does not raise a false alarm. Render's `healthCheckPath` is empty, so a 503 cannot trigger a restart. Covered by `test_health_alert.py`.
+- **Verified:** `Wed 11 Nov 10:00` open · `09:12` closed · `15:34` open · `16:00` closed · holiday `10 Nov` closed · `Sat 14 Nov` closed.
 
 ### 7. Unpinned dependencies
 - **Symptom:** Render builds can drift or break.
