@@ -8,6 +8,7 @@
 - **Symptom:** Since the 2026-10-15 expiry, 185/185 resolved trades have `entry_premium == exit_premium`, `stale_ltp=True`, `MFE=MAE=0`; 54 book exactly −0.50%.
 - **Cause:** `start_feed()` subscribes once at startup and never reloads on rollover. `MIN_DTE=2` skipped the nearest weekly expiry. `flush_to_db()` re-wrote the last tick snapshot every 5 minutes with no age check. On 2026-11-02 the chain still contained the expired `2026-10-27` series; 23000 CE had only 2 distinct LTPs all day while spot had 75.
 - **Fix (in code):** `MIN_DTE=0`; reload instruments + resubscribe before the open and on an empty trading-day flush; skip ticks older than 3 minutes; skip expired expiries; compute `oi_change` only against a same-day prior snapshot; expose `last_tick_age_sec` in `/health` and `/status`.
+- **Verified live 2026-11-11 (first trading session after the fixes):** `stale_ltp = 0` across all 103 trades (was 185/185); chain holds **active-only** expiries `2026-11-17` and `2026-11-23` (no expired series); IV populated on 739/1000 chain rows (was null); 512 distinct `last_price` in 1000 rows; 37 distinct `net_pnl_pct` values in 103 trades; `tick_count` rose 388 → 574 as the new expiry loaded; `refresh_feed` logged `resubscribed 372 tokens`.
 
 ### 2. Resolver books stale entries as −0.50% (P0)
 - **Symptom:** Every post-rollover time exit is a guaranteed −0.50% (cost only), so the backtest reads 0% win rate.
