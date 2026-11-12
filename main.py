@@ -17,6 +17,7 @@ from db import init_db
 from ws_feed import start_feed
 from scheduler import start_scheduler
 from api import app
+import netdiag
 from config import SYMBOLS, API_HOST, API_PORT
 
 # ── Logging setup ─────────────────────────────────────────────────────────────
@@ -46,6 +47,8 @@ def main():
 
     # 2. Start WebSocket feed in background thread
     logger.info("Step 2: Starting WebSocket feed for %s...", SYMBOLS)
+    # Diagnostic first, in its own thread: the deploy must not wait on network probes.
+    threading.Thread(target=netdiag.report, daemon=True, name="netdiag").start()
     try:
         start_feed(SYMBOLS)
     except Exception as e:
