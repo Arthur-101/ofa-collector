@@ -49,8 +49,9 @@ def main():
     try:
         start_feed(SYMBOLS)
     except Exception as e:
-        logger.error("Failed to start WebSocket feed: %s", e)
-        raise
+        # A broker outage must not take the service down. The scheduler retries
+        # refresh_feed every 5 min, and /health already reports the dead feed.
+        logger.error("Failed to start WebSocket feed: %s — scheduler will retry", e)
 
     # Wait for WebSocket to connect and receive initial ticks
     logger.info("Waiting 20s for WebSocket to stabilise...")
