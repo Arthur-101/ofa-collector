@@ -62,7 +62,7 @@ _refresh_lock = threading.Lock()
 
 # ── Start the WebSocket feed ──────────────────────────────────────────────────
 
-def start_feed(symbols: list[str]) -> None:
+def start_feed(symbols: list[str], force: bool = False) -> None:
     """
     Login, load instruments, subscribe to WebSocket SnapQuote feed.
     Runs the WebSocket in a background daemon thread.
@@ -70,9 +70,21 @@ def start_feed(symbols: list[str]) -> None:
     """
     global _sws, _ws_thread, _token_map, _connected, _last_refresh
 
-    if _ws_thread is not None and _ws_thread.is_alive() and _connected:
-        logger.warning("start_feed: feed already connected — skipping restart")
-        return
+    if not force and _ws_thread is not None and _ws_thread.is_alive() and _connected:
+        # A socket can stay "connected" while delivering nothing. That is a
+        # zombie, not a healthy feed: replacing it is the only recovery.
+        age = last_tick_age_seconds()
+        if age is None or age <= MAX_TICK_AGE_SECONDS:
+            logger.warning("start_feed: feed already connected — skipping restart")
+            return
+        logger.warning("start_feed: socket silent for %.0fs — replacing it", age)
+
+    if _sws is not None:
+        try:
+            _sws.close()
+        except Exception:
+            pass
+        _sws = None
 
     # Login
     client = _af._login()
@@ -237,7 +249,13 @@ def refresh_feed(symbols: list[str], force: bool = False) -> bool:
         _token_map = new_map
         _last_refresh = now
 
-        if _sws is not None and _connected:
+        tick_age = last_tick_age_seconds()
+        # Resubscribing on a socket that has gone silent does nothing: the
+        # broker accepted the subscription but stopped delivering. Only a new
+        # connection recovers, so treat a previously-ticking feed as dead.
+        silent = tick_age is not None and tick_age > MAX_TICK_AGE_SECONDS
+
+        if _sws is not None and _connected and not silent:
             try:
                 if old_tokens:
                     _sws.unsubscribe(
@@ -255,9 +273,10 @@ def refresh_feed(symbols: list[str], force: bool = False) -> bool:
             except Exception as e:
                 logger.error("refresh_feed: resubscribe failed (%s) — restarting feed", e)
 
-        logger.warning("refresh_feed: socket down — restarting feed")
+        logger.warning("refresh_feed: socket %s — restarting feed",
+                       "silent" if silent else "down")
         try:
-            start_feed(symbols)
+            start_feed(symbols, force=silent)
         except Exception as e:
             logger.error("refresh_feed: restart failed: %s", e)
             return False
@@ -316,6 +335,12 @@ def flush_to_db(symbol: str) -> list[dict]:
     except Exception as e:
         logger.error("Could not fetch spot price: %s", e)
         spot = None
+
+    if spot is None:
+        # Every row would carry spot_price=None and IV=None, and moneyness
+        # cannot be computed. A chain snapshot without spot is not a snapshot.
+        logger.warning("flush_to_db: no spot price — skipping flush")
+        return []
 
     today_str = now_dt.date().isoformat()
     timestamp = now_dt.strftime("%Y-%m-%d %H:%M:%S")
