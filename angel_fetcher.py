@@ -34,6 +34,9 @@ API_KEY     = os.getenv("ANGEL_API_KEY")
 CLIENT_ID   = os.getenv("ANGEL_CLIENT_ID")
 PASSWORD    = os.getenv("ANGEL_PASSWORD")
 TOTP_SECRET = os.getenv("ANGEL_TOTP_SECRET")
+# Angel One rate-limits/bans cloud egress IPs (TCP timeout on apiconnect).
+# A static Indian IP registered in the SmartAPI portal is the supported fix.
+PROXY_URL   = os.getenv("ANGEL_PROXY_URL")
 
 MIN_DTE    = 0     # include today's expiry (0DTE); expired dates are filtered out
 STRIKE_PCT = 0.10  # keep strikes within ±10% of spot
@@ -70,7 +73,7 @@ def _login() -> SmartConnect:
     global _client, _client_date
     logger.info("Logging in to Angel One …")
     totp = pyotp.TOTP(TOTP_SECRET).now()
-    obj  = SmartConnect(api_key=API_KEY)
+    obj  = SmartConnect(api_key=API_KEY, proxies={"https": PROXY_URL} if PROXY_URL else None)
     resp = obj.generateSession(CLIENT_ID, PASSWORD, totp)
     if resp.get("status") is False:
         raise RuntimeError(f"Login failed: {resp.get('message')}")
