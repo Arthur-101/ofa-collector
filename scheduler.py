@@ -7,6 +7,7 @@
 #   shutdown_job— 4:00 PM IST (Mon-Fri): graceful stop
 
 import logging
+import os
 import sys
 import pytz
 from apscheduler.schedulers.background import BackgroundScheduler
@@ -14,7 +15,7 @@ from config import (
     SYMBOLS, POLL_INTERVAL_MINUTES,
     RESET_HOUR, RESET_MINUTE,
     EXPORT_HOUR, EXPORT_MINUTE,
-    # SHUTDOWN_HOUR, SHUTDOWN_MINUTE,
+    SHUTDOWN_HOUR, SHUTDOWN_MINUTE,
 )
 
 logger = logging.getLogger(__name__)
@@ -112,11 +113,15 @@ def _archive_daily_strike_stats_job():
         logger.error("archive_daily_strike_stats_job error: %s", e)
 
 
-# def _shutdown_job():
-#     logger.info("⏰ shutdown_job fired — market closed, stopping scheduler")
-#     if _scheduler:
-#         _scheduler.shutdown(wait=False)
-#     logger.info("Scheduler stopped. App idling until next reset_job.")
+def _shutdown_job():
+    # Nothing to flush: export/archive finish at 15:31 and by 16:00 every tick is
+    # older than MAX_TICK_AGE_SECONDS, so flush_to_db would drop them anyway.
+    # Exit 0 so Railway's cron run counts as complete and the next one is not skipped.
+    logger.info("⏰ shutdown_job fired — market closed, exiting for the day")
+    if _scheduler:
+        _scheduler.shutdown(wait=False)
+    logging.shutdown()
+    os._exit(0)
 
 
 def start_scheduler() -> BackgroundScheduler:
@@ -185,16 +190,16 @@ def start_scheduler() -> BackgroundScheduler:
     )
 
     # 4:00 PM IST — graceful shutdown
-    # _scheduler.add_job(
-    #     _shutdown_job,
-    #     trigger="cron",
-    #     day_of_week="mon-fri",
-    #     hour=SHUTDOWN_HOUR,
-    #     minute=SHUTDOWN_MINUTE,
-    #     id="shutdown_job",
-    #     name="Post-market shutdown",
-    #     misfire_grace_time=300,
-    # )
+    _scheduler.add_job(
+        _shutdown_job,
+        trigger="cron",
+        day_of_week="mon-fri",
+        hour=SHUTDOWN_HOUR,
+        minute=SHUTDOWN_MINUTE,
+        id="shutdown_job",
+        name="Post-market shutdown",
+        misfire_grace_time=300,
+    )
 
     _scheduler.start()
     logger.info("Scheduler started with %d jobs", len(_scheduler.get_jobs()))
