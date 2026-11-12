@@ -19,6 +19,11 @@ import pyotp
 from datetime import date, timedelta, datetime, timezone
 from dotenv import load_dotenv
 from SmartApi import SmartConnect
+import logzero
+
+# SmartAPI logs the full login request (client id, password, TOTP) at ERROR.
+# Keep its logger quiet; _login() surfaces failures without the credentials.
+logzero.loglevel(logging.CRITICAL)
 
 from db import get_latest_oi_snapshot, insert_options_rows
 
