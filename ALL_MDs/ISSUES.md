@@ -78,6 +78,18 @@
 - **Cause:** `holidays.py` lists `2026-11-08` as "Diwali Laxmi Pujan", which is correct for the normal session but the exchange still trades one hour that evening.
 - **Fix:** not worth special-casing a date that occurs once a year; note it if intraday coverage ever matters for a Diwali sample.
 
+### 15. Silent socket + broker login outage killed the feed mid-session (P0, fixed)
+- **Symptom:** 2026-11-12, ticks stopped at 13:13 IST while `/health` still reported `ws_connected: true`. cron-job.org sent the first 503 email. `last_tick_age_sec` climbed past 1,500 while `market_open: true`.
+- **Cause:** two independent failures. (a) The SmartAPI socket stayed open but stopped delivering; `start_feed()` refused to replace it because `_connected` was still `True`, and `refresh_feed()` only resubscribed on the zombie. (b) At 13:15 Render's egress to `apiconnect.angelone.in` began timing out (7s connect timeout). The same host is reachable from the local machine, so the failure is on Render's egress path, not Angel One's API. Because `main()` re-raised on the login failure, the first redeploy died and Render marked the build failed.
+- **Fix (in code):** `start_feed(force=...)` treats a socket that has ticked before and then gone quiet for more than `MAX_TICK_AGE_SECONDS` as a zombie and replaces it; `refresh_feed()` forces that path instead of resubscribing. `flush_to_db()` skips the flush when spot is unavailable, so no more chain rows with `spot_price=None` (the 401 such rows from the 13:45 flush were deleted). `/health` and `/status` now expose `ws_alive` (connected **and** fresh) alongside the raw `ws_connected`. `main()` logs a failed initial feed start instead of exiting, so a broker outage degrades to 503 rather than a failed deploy. Covered by `test_zombie_feed.py`.
+- **Verified:** deploy `8a1dac4` came up Live with `tick_count: 0`, `ws_alive: false` and `/health` 503 — the web server stayed up while the broker host was unreachable. The scheduler retries `refresh_feed` every 5 min.
+- **Still open:** if Render's egress to `apiconnect.angelone.in` stays blocked, no code change recovers the feed; the collector needs a different host or egress. Confirm with the next session.
+
+### 16. LLM fallback chain is fully exhausted (open, config)
+- **Symptom:** 2026-11-12 logs show all 7 models failing every 5-min cycle: 2 × HTTP 404 (model retired), 2 × 429 (free daily limit), 2 × 403 (OpenRouter key limit `$0.20 of $0.20 used; does not reset`).
+- **Impact:** `llm_bias`/`llm_confidence` are never produced; signals still fire in RULES mode, so collection and the backtest are unaffected. `llm_confidence` is non-null on only 2/199 filled trades.
+- **Fix:** top up the OpenRouter key and remove the two retired models from the chain. No code change can substitute for the key.
+
 ## Resolved
 
 ### Anon key silently used
