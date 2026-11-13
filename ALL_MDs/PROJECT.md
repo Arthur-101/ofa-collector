@@ -19,7 +19,7 @@
 | `poll_job` | every 5 min, 09:15–15:30 | Flush WS ticks to DB, then `run_cloud_analysis` |
 | `export_job` | 15:31 | Export the day's CSV to GitHub |
 | `archive_daily_strike_stats_job` | 15:31 | Archive 5-min strike stats for the 20-day rolling baseline |
-| `shutdown_job` | 16:00 | **Commented out** — service idles after close |
+| `shutdown_job` | 16:00 | `os._exit(0)` — container stops so billing stops (see Deployment) |
 
 All jobs skip NSE holidays via `holidays.py`.
 
@@ -75,9 +75,49 @@ All jobs skip NSE holidays via `holidays.py`.
 
 ## Deployment
 
+Railway, US West, service `web` → `https://ofa-collector.up.railway.app`.
+
 ```
 Procfile:        web: python main.py
-nixpacks.toml:   python311 + gcc, NIXPACKS_PYTHON_VERSION=3.11
+Cron:            15 3 * * 1-5   (03:15 UTC = 08:45 IST, Mon–Fri)
 ```
 
-No Dockerfile. Render supplies `PORT`; `config.py` reads it.
+No Dockerfile. Railway supplies `PORT` (`config.py:45`, falls back to 8000
+locally). The live build runs **Python 3.13.18** — `nixpacks.toml` pins 3.11 but
+is not taking effect, so treat it as legacy rather than as the real build spec.
+
+**Market hours only, on the Free plan.** Railway bills by uptime, not by replica
+limits: 24/7 costs ~$2.14/mo against a $1 grant, while 08:45–16:00 IST on
+weekdays measured ~$0.77/mo, which fits permanently. That is why
+`shutdown_job` must keep exiting at 16:00 — a container that never exits bills
+all night and all weekend.
+
+Two consequences worth knowing:
+
+- **`/health` returns 502 outside 09:00–16:00 IST.** No container is running, so
+  nothing answers. This is correct, not an outage. The projects-list badge
+  "1/1 service online" is project-level and does not mean a container is up.
+- **Redeploys cost egress** ($0.05/GB), and egress was 42% of the first month's
+  bill. Deploy rarely.
+
+Railway cron services have **no restart policy**. A run that fails to exit makes
+the next day's run be skipped silently, so `cron-job.org` pings `/health` at
+09:15 and 09:25 IST on weekdays as the detector.
+
+## Retention
+
+`db_supabase.purge_old_data_supabase()` deletes `options_chain` older than
+`RETENTION_DAYS = 45` calendar days (~30 trading days) after every export.
+`signals`, `trades` and `strike_daily_stats` are never purged. Neither is
+`news_raw` — it is 3.6 MB over 38 days (~34 MB/year), small enough not to
+bother.
+
+45 days, not 60, is measured: after `VACUUM` + `REINDEX` the table is 204 B/row
+heap + 120 B/row index ≈ 9.3 MB per 29k-row trading day, so 30 trading days is
+~280 MB of the 500 MB free tier. 60 days would reach ~435 MB, leaving no room
+for autovacuum. `options_chain` also has non-default autovacuum factors
+(`0.02`) because a daily 29k-row delete is too small a fraction of a large
+table for the defaults to fire promptly.
+
+`options_chain` cannot be backfilled — Angel One's historical API returns OHLCV
+only, with no OI/IV — so a purged day is gone for good.
