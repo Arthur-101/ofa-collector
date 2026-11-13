@@ -104,7 +104,6 @@ OI Change: {signal.get('oi_change', 'N/A')} contracts
 Volume: {signal.get('volume', 'N/A')}
 IV: {signal.get('iv', 'N/A')}%
 Signal Strength: {signal.get('signal_strength', 'N/A')}/5
-Detection Mode: {signal.get('mode', 'N/A')}
 
 === MARKET CONTEXT ===
 NIFTY Spot: {context.get('current_spot', 'N/A')}

@@ -518,24 +518,33 @@ def get_row_count_supabase() -> int:
         return 0
 
 
+RETENTION_DAYS = 45
+
+
 def purge_old_data_supabase() -> None:
     """
-    Call the Supabase SQL function to purge options_chain and news_raw
-    rows older than 7 days. Keeps database under ~90 MB forever.
+    Delete options_chain rows older than RETENTION_DAYS (45 calendar days,
+    ~30 trading days).
+
+    Measured on 2026-11-13: 204 B/row heap + 120 B/row index after a REINDEX
+    = ~9.3 MB per 29k-row trading day, so 30 trading days is ~280 MB of
+    options_chain. 60 calendar days would reach ~435 MB of the 500 MB free
+    tier, which leaves no room for autovacuum.
+
+    The purge_old_data RPC this used to call does not exist in the project
+    (verified 2026-11-13), so it only ever produced a failed request per export.
     """
     client = get_supabase()
     try:
-        client.rpc("purge_old_data").execute()
-        logger.info("Supabase: 7-day retention purge completed via RPC")
+        from datetime import timedelta
+        cutoff = (datetime.now(timezone.utc) - timedelta(days=RETENTION_DAYS)).isoformat()
+        client.table("options_chain").delete().lt("timestamp", cutoff).execute()
+        logger.info(
+            "Supabase: %d-day retention purge completed for options_chain (cutoff: %s)",
+            RETENTION_DAYS, cutoff,
+        )
     except Exception as e:
-        logger.debug("Supabase purge_old_data RPC call: %s, falling back to direct delete", e)
-        try:
-            from datetime import timedelta
-            cutoff = (datetime.now(timezone.utc) - timedelta(days=7)).isoformat()
-            client.table("options_chain").delete().lt("timestamp", cutoff).execute()
-            logger.info("Supabase: direct 7-day retention purge completed for options_chain (cutoff: %s)", cutoff)
-        except Exception as e2:
-            logger.error("Supabase direct purge failed: %s", e2)
+        logger.error("Supabase purge failed: %s", e)
 
 
 def count_trading_days_supabase(symbol: str) -> int:
