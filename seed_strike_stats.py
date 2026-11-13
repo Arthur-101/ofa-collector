@@ -1,6 +1,5 @@
 # seed_strike_stats.py — Standalone Seeder for strike_daily_stats
-# Runs across all stored dates in options_chain to build the 20-day rolling baseline
-# before re-enabling the 7-day retention purge.
+# Runs across all stored dates in options_chain to build the 20-day rolling baseline.
 
 import sys
 import logging
